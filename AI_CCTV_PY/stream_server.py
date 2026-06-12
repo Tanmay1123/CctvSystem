@@ -7,8 +7,11 @@ import os
 import shutil
 import time
 import urllib3
+import threading
 from datetime import datetime
 import mediapipe as mp
+from mediapipe.tasks import python as mp_python
+from mediapipe.tasks.python import vision as mp_vision
 import math
 
 
@@ -19,13 +22,22 @@ CORS(app)
 
 model = YOLO("yolov8n.pt")
 
-mp_face_mesh = mp.solutions.face_mesh
+# Face landmark detection via MediaPipe Tasks API (the legacy mp.solutions.face_mesh
+# API was removed from the Python 3.13 wheels). Uses the same 478-point face mesh,
+# so the eye-aspect-ratio and head-pose math below is unchanged.
+FACE_LANDMARKER_MODEL = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "face_landmarker.task"
+)
 
-face_mesh = mp_face_mesh.FaceMesh(
-    max_num_faces=1,
-    refine_landmarks=True,
-    min_detection_confidence=0.5,
-    min_tracking_confidence=0.5
+face_landmarker = mp_vision.FaceLandmarker.create_from_options(
+    mp_vision.FaceLandmarkerOptions(
+        base_options=mp_python.BaseOptions(model_asset_path=FACE_LANDMARKER_MODEL),
+        running_mode=mp_vision.RunningMode.IMAGE,
+        num_faces=5,
+        min_face_detection_confidence=0.5,
+        min_tracking_confidence=0.5
+    )
 )
 
 LEFT_EYE = [33, 160, 158, 133, 153, 144]
@@ -33,13 +45,69 @@ RIGHT_EYE = [362, 385, 387, 263, 373, 380]
 NOSE_TIP = 1
 CHIN = 152
 FOREHEAD = 10
-# Webcam
-camera = cv2.VideoCapture(0)
-# rtsp_url = "rtsp://admin:YOUR_PASSWORD@CAMERA_IP:5543/live/channel1"
-# camera = cv2.VideoCapture(rtsp_url)
+# -----------------------------------
+# VIDEO SOURCE
+# -----------------------------------
+# CP Plus Wi-Fi camera on the LAN (RTSP enabled via ONVIF in the CP Plus app).
+#   - channel0 -> main stream (2304x1296)
+#   - channel1 -> sub  stream (640x360)  <-- used here: much faster for YOLO on CPU
+# Port is 5543 (not the usual 554) for this camera. Credentials: admin / Admin2025.
+#
+# The CAMERA_SOURCE env var can still override this (set it to "0" for a local webcam).
+CAMERA_SOURCE = os.environ.get(
+    "CAMERA_SOURCE",
+    "rtsp://admin:Admin2025@192.168.29.89:5543/live/channel1"
+)
+
+# For RTSP, force TCP transport (more reliable than UDP over Wi-Fi).
+if CAMERA_SOURCE.lower().startswith("rtsp://"):
+    os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
+    camera = cv2.VideoCapture(CAMERA_SOURCE, cv2.CAP_FFMPEG)
+else:
+    camera = cv2.VideoCapture(int(CAMERA_SOURCE))
+
+# Keep the decoder buffer tiny so we don't accumulate stale frames.
+try:
+    camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+except Exception:
+    pass
+
+
+class FrameGrabber:
+    """Continuously reads from the camera in a background thread and keeps ONLY
+    the most recent frame. Without this, OpenCV queues incoming RTSP frames while
+    our (slower) AI processing runs, so the displayed feed falls further and
+    further behind real time. By always grabbing the latest frame and dropping
+    the rest, latency stays low (we trade a few skipped frames for a live feed)."""
+
+    def __init__(self, cap):
+        self.cap = cap
+        self.lock = threading.Lock()
+        self.frame = None
+        self.running = True
+        self.thread = threading.Thread(target=self._reader, daemon=True)
+        self.thread.start()
+
+    def _reader(self):
+        while self.running:
+            ok, f = self.cap.read()
+            if not ok:
+                time.sleep(0.01)
+                continue
+            with self.lock:
+                self.frame = f
+
+    def read(self):
+        with self.lock:
+            if self.frame is None:
+                return False, None
+            return True, self.frame.copy()
+
+
+grabber = FrameGrabber(camera)
 
 # API URL
-API_URL = "https://localhost:7090/api/alerts"
+API_URL = "http://localhost:5237/api/alerts"
 
 # Rule settings
 RULES = {
@@ -59,19 +127,18 @@ MOVEMENT_THRESHOLD = 80
 PYTHON_ALERTS_FOLDER = "alerts"
 
 # ASP.NET API wwwroot alerts folder
-API_ALERTS_FOLDER = r"C:\AI_CCTV_Dashboard\AI_CCTV_API\AI_CCTV_API\wwwroot\alerts"
+API_ALERTS_FOLDER = r"C:\Users\Admin\Desktop\CCTV_AITS\CctvSystem\AI_CCTV_API\AI_CCTV_API\wwwroot\alerts"
 
 os.makedirs(PYTHON_ALERTS_FOLDER, exist_ok=True)
 os.makedirs(API_ALERTS_FOLDER, exist_ok=True)
 
+# Intrusion state (per-person sleeping state now lives in PersonTracker)
 alert_sent = False
-sleep_alert_sent = False
 last_person_seen_time = 0
-last_person_box = None
-low_movement_start_time = None
-eyes_closed_start_time = None
+
+# How long (seconds) eyes-closed or head-down must persist while a person is
+# already sitting still before it counts as sleeping.
 SMART_SLEEP_SECONDS = 3
-head_down_start_time = None
 SMART_HEAD_SECONDS = 3
 
 
@@ -135,7 +202,7 @@ def create_alert(frame, alert_type):
 
     shutil.copy2(python_image_path, api_image_path)
 
-    image_url = f"https://localhost:7090/alerts/{file_name}"
+    image_url = f"http://localhost:5237/alerts/{file_name}"
 
     send_alert_to_api(alert_type, image_url)
 
@@ -155,245 +222,212 @@ def eye_aspect_ratio(eye_points):
     return (vertical1 + vertical2) / (2.0 * horizontal)
 
 
-def detect_eyes_closed(frame):
+def detect_faces(frame):
+    """Run the face mesh ONCE and return a list of per-face states, so each person
+    in a multi-person scene gets their own eyes/head reading. Each item is a dict:
+        {"nose": (x, y), "eyes_closed": bool, "ear": float,
+         "head_down": bool, "ratio": float}
+    The 'nose' pixel point is used to associate the face with a person box."""
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+    result = face_landmarker.detect(mp_image)
 
-    results = face_mesh.process(rgb)
-
-    if not results.multi_face_landmarks:
-        return False, 0
+    faces = []
+    if not result.face_landmarks:
+        return faces
 
     h, w, _ = frame.shape
 
-    face_landmarks = results.multi_face_landmarks[0]
+    for lms in result.face_landmarks:
+        # --- eyes ---
+        left_eye = [(int(lms[i].x * w), int(lms[i].y * h)) for i in LEFT_EYE]
+        right_eye = [(int(lms[i].x * w), int(lms[i].y * h)) for i in RIGHT_EYE]
+        avg_ear = (eye_aspect_ratio(left_eye) + eye_aspect_ratio(right_eye)) / 2
+        eyes_closed = avg_ear < 0.22
+        for p in left_eye + right_eye:
+            cv2.circle(frame, p, 2, (0, 255, 255), -1)
 
-    left_eye_points = []
-    right_eye_points = []
+        # --- head ---
+        nose = lms[NOSE_TIP]
+        chin = lms[CHIN]
+        forehead = lms[FOREHEAD]
+        nose_y = int(nose.y * h)
+        chin_y = int(chin.y * h)
+        forehead_y = int(forehead.y * h)
+        face_height = chin_y - forehead_y
+        ratio = (nose_y - forehead_y) / face_height if face_height != 0 else 0
+        head_down = ratio > 0.58
 
-    for idx in LEFT_EYE:
-        lm = face_landmarks.landmark[idx]
-        left_eye_points.append((int(lm.x * w), int(lm.y * h)))
+        faces.append({
+            "nose": (int(nose.x * w), nose_y),
+            "eyes_closed": eyes_closed,
+            "ear": avg_ear,
+            "head_down": head_down,
+            "ratio": ratio,
+        })
 
-    for idx in RIGHT_EYE:
-        lm = face_landmarks.landmark[idx]
-        right_eye_points.append((int(lm.x * w), int(lm.y * h)))
+    return faces
 
-    left_ear = eye_aspect_ratio(left_eye_points)
-    right_ear = eye_aspect_ratio(right_eye_points)
 
-    avg_ear = (left_ear + right_ear) / 2
+def box_contains(box, point):
+    x1, y1, x2, y2 = box
+    return x1 <= point[0] <= x2 and y1 <= point[1] <= y2
 
-    eyes_closed = avg_ear < 0.22
 
-    for p in left_eye_points + right_eye_points:
-        cv2.circle(frame, p, 2, (0, 255, 255), -1)
+class PersonTracker:
+    """Lightweight per-person tracker: matches each frame's person boxes to existing
+    tracks by nearest center, so movement is measured for the SAME person across
+    frames (the old code compared one person's box to a different person's box,
+    which is why the inactivity timer never accumulated in a multi-person scene).
+    Each track keeps its own low-movement / eyes-closed / head-down timers."""
 
-    return eyes_closed, avg_ear
+    def __init__(self, dist_thresh=120, max_missed=20):
+        self.tracks = {}
+        self.next_id = 0
+        self.dist_thresh = dist_thresh
+        self.max_missed = max_missed
 
-def detect_head_down(frame):
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    @staticmethod
+    def _center(box):
+        x1, y1, x2, y2 = box
+        return ((x1 + x2) / 2, (y1 + y2) / 2)
 
-    results = face_mesh.process(rgb)
+    def update(self, boxes):
+        now = time.time()
+        assigned = set()
+        out = []
 
-    if not results.multi_face_landmarks:
-        return False, 0
+        for box in boxes:
+            c = self._center(box)
+            best_id, best_d = None, self.dist_thresh
+            for tid, tr in self.tracks.items():
+                if tid in assigned:
+                    continue
+                d = math.dist(c, tr["center"])
+                if d < best_d:
+                    best_d, best_id = d, tid
 
-    h, w, _ = frame.shape
-    face_landmarks = results.multi_face_landmarks[0]
+            if best_id is None:
+                tid = self.next_id
+                self.next_id += 1
+                tr = {"center": c, "box": box, "low_start": None,
+                      "eyes_start": None, "head_start": None,
+                      "sleep_sent": False, "missed": 0}
+                self.tracks[tid] = tr
+                movement = 999
+            else:
+                tid = best_id
+                tr = self.tracks[tid]
+                movement = calculate_box_movement(tr["box"], box)
+                tr["center"], tr["box"], tr["missed"] = c, box, 0
 
-    nose = face_landmarks.landmark[NOSE_TIP]
-    chin = face_landmarks.landmark[CHIN]
-    forehead = face_landmarks.landmark[FOREHEAD]
+            # per-person low-movement timer
+            if movement < MOVEMENT_THRESHOLD:
+                if tr["low_start"] is None:
+                    tr["low_start"] = now
+            else:
+                tr["low_start"] = None
+                tr["eyes_start"] = None
+                tr["head_start"] = None
+                tr["sleep_sent"] = False
 
-    nose_y = int(nose.y * h)
-    chin_y = int(chin.y * h)
-    forehead_y = int(forehead.y * h)
+            assigned.add(tid)
+            out.append((tid, box, tr))
 
-    face_height = chin_y - forehead_y
-    nose_position = nose_y - forehead_y
+        # age out tracks that weren't matched this frame
+        for tid in list(self.tracks.keys()):
+            if tid not in assigned:
+                self.tracks[tid]["missed"] += 1
+                if self.tracks[tid]["missed"] > self.max_missed:
+                    del self.tracks[tid]
 
-    ratio = nose_position / face_height if face_height != 0 else 0
+        return out
 
-    head_down = ratio > 0.58
 
-    return head_down, ratio
+person_tracker = PersonTracker()
 
 def generate_frames():
     global alert_sent
-    global sleep_alert_sent
     global last_person_seen_time
-    global last_person_box
-    global low_movement_start_time
-    global eyes_closed_start_time
-    global head_down_start_time
 
     while True:
 
-        success, frame = camera.read()
+        success, frame = grabber.read()
 
         if not success:
-            break
+            # Camera not ready yet (or a dropped frame); wait briefly and retry
+            # instead of killing the stream.
+            time.sleep(0.01)
+            continue
 
-        person_detected = False
-        person_count = 0
+        now = time.time()
+        results = model(frame, verbose=False)
 
-        results = model(frame)
+        # One face-mesh inference -> per-face eyes/head state for the whole frame
+        faces = detect_faces(frame)
 
-        # Eye detection
-        eyes_closed, ear_value = detect_eyes_closed(frame)
-
-        if eyes_closed:
-            if eyes_closed_start_time is None:
-                eyes_closed_start_time = time.time()
-        else:
-            eyes_closed_start_time = None
-
-        # Head detection
-        head_down, head_ratio = detect_head_down(frame)
-
-        if head_down:
-            if head_down_start_time is None:
-                head_down_start_time = time.time()
-        else:
-            head_down_start_time = None
-
-        # UI Text
-        cv2.putText(
-            frame,
-            f"EAR: {ear_value:.2f}",
-            (20, 80),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
-            (0, 255, 255),
-            2
-        )
-
-        cv2.putText(
-            frame,
-            "Eyes Closed" if eyes_closed else "Eyes Open",
-            (20, 120),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
-            (0, 0, 255) if eyes_closed else (0, 255, 0),
-            2
-        )
-
-        cv2.putText(
-            frame,
-            f"Head Ratio: {head_ratio:.2f}",
-            (20, 160),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
-            (255, 255, 0),
-            2
-        )
-
-        cv2.putText(
-            frame,
-            "Head Down" if head_down else "Head Normal",
-            (20, 200),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
-            (0, 0, 255) if head_down else (0, 255, 0),
-            2
-        )
-
-        # YOLO Detection
+        # Collect person boxes from YOLO
+        person_boxes = []
         for result in results:
-
             for box in result.boxes:
-
-                class_id = int(box.cls[0])
-                class_name = model.names[class_id]
-
-                if class_name == "person":
-
-                    person_detected = True
-                    person_count += 1
-                    last_person_seen_time = time.time()
-
+                if model.names[int(box.cls[0])] == "person":
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    confidence = float(box.conf[0])
+                    person_boxes.append((x1, y1, x2, y2))
 
-                    current_box = (x1, y1, x2, y2)
+        person_count = len(person_boxes)
+        person_detected = person_count > 0
+        if person_detected:
+            last_person_seen_time = now
 
-                    movement = calculate_box_movement(
-                        last_person_box,
-                        current_box
-                    )
+        # Track each person across frames so movement is per-person
+        tracked = person_tracker.update(person_boxes)
 
-                    cv2.rectangle(
-                        frame,
-                        (x1, y1),
-                        (x2, y2),
-                        (0, 255, 0),
-                        2
-                    )
+        for tid, box, tr in tracked:
+            x1, y1, x2, y2 = box
 
-                    cv2.putText(
-                        frame,
-                        f"Person {confidence:.2f}",
-                        (x1, y1 - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
-                        (0, 255, 0),
-                        2
-                    )
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-                    # Sleeping Detection
-                    if RULES["sleeping_detection"]:
+            # Associate a face (whose nose falls inside this person's box)
+            face = next((f for f in faces if box_contains(box, f["nose"])), None)
 
-                        if movement < MOVEMENT_THRESHOLD:
+            # Per-person eyes/head timers (only meaningful while sitting still)
+            if face and tr["low_start"] is not None:
+                if face["eyes_closed"]:
+                    if tr["eyes_start"] is None:
+                        tr["eyes_start"] = now
+                else:
+                    tr["eyes_start"] = None
+                if face["head_down"]:
+                    if tr["head_start"] is None:
+                        tr["head_start"] = now
+                else:
+                    tr["head_start"] = None
 
-                            if low_movement_start_time is None:
-                                low_movement_start_time = time.time()
+            label = "Person"
+            if face:
+                label += " | " + ("eyes shut" if face["eyes_closed"] else "eyes open")
+                if face["head_down"]:
+                    label += " | head down"
+            cv2.putText(frame, label, (x1, y1 - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
 
-                            inactive_seconds = (
-                                time.time() - low_movement_start_time
-                            )
+            # Sleeping Detection (per person)
+            if RULES["sleeping_detection"] and tr["low_start"] is not None:
+                inactive = now - tr["low_start"]
+                eyes_dur = (now - tr["eyes_start"]) if tr["eyes_start"] else 0
+                head_dur = (now - tr["head_start"]) if tr["head_start"] else 0
 
-                            cv2.putText(
-                                frame,
-                                f"Inactive: {int(inactive_seconds)}s",
-                                (x1, y2 + 30),
-                                cv2.FONT_HERSHEY_SIMPLEX,
-                                0.7,
-                                (0, 165, 255),
-                                2
-                            )
+                cv2.putText(frame, f"Inactive: {int(inactive)}s", (x1, y2 + 22),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
 
-                            eyes_closed_duration = 0
-                            head_down_duration = 0
-
-                            if eyes_closed_start_time is not None:
-                                eyes_closed_duration = (
-                                    time.time() - eyes_closed_start_time
-                                )
-
-                            if head_down_start_time is not None:
-                                head_down_duration = (
-                                    time.time() - head_down_start_time
-                                )
-
-                            if (
-                                inactive_seconds >= SLEEP_SECONDS
-                                and eyes_closed_duration >= SMART_SLEEP_SECONDS
-                                and head_down_duration >= SMART_HEAD_SECONDS
-                                and not sleep_alert_sent
-                            ):
-
-                                create_alert(
-                                    frame,
-                                    "Sleeping Detection"
-                                )
-
-                                sleep_alert_sent = True
-
-                        else:
-                            low_movement_start_time = None
-                            sleep_alert_sent = False
-
-                    last_person_box = current_box
+                # Still for SLEEP_SECONDS AND (eyes closed OR head down) long enough.
+                # 'OR' is deliberate: a sleeping person's head is often down, which
+                # hides the eyes from the face mesh, so requiring both rarely fires.
+                if (inactive >= SLEEP_SECONDS
+                        and (eyes_dur >= SMART_SLEEP_SECONDS or head_dur >= SMART_HEAD_SECONDS)
+                        and not tr["sleep_sent"]):
+                    create_alert(frame, "Sleeping Detection")
+                    tr["sleep_sent"] = True
 
         # Intrusion Detection
         if (
@@ -410,22 +444,13 @@ def generate_frames():
         # Reset intrusion
         if not person_detected and alert_sent:
 
-            if time.time() - last_person_seen_time > 5:
+            if now - last_person_seen_time > 5:
 
                 alert_sent = False
 
                 print(
                     "Intrusion alert reset. Ready for next detection."
                 )
-
-        # Reset sleeping
-        if not person_detected:
-
-            last_person_box = None
-            low_movement_start_time = None
-            eyes_closed_start_time = None
-            head_down_start_time = None
-            sleep_alert_sent = False
 
         cv2.putText(
             frame,
@@ -458,6 +483,23 @@ def video():
         generate_frames(),
         mimetype="multipart/x-mixed-replace; boundary=frame"
     )
+
+
+@app.route("/test-alert")
+def test_alert():
+    """Fire a manual alert on demand to verify the full pipeline
+    (Python -> .NET API -> PostgreSQL -> email -> dashboard) without waiting for a
+    real detection. Open http://localhost:5000/test-alert in a browser."""
+    success, frame = grabber.read()
+    if not success or frame is None:
+        # Fall back to a blank frame if the camera hasn't produced one yet
+        import numpy as np
+        frame = np.zeros((360, 640, 3), dtype="uint8")
+        cv2.putText(frame, "TEST ALERT", (120, 190),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 3)
+
+    create_alert(frame, "Test Alert")
+    return {"status": "ok", "message": "Test alert sent to API"}, 200
 
 
 if __name__ == "__main__":

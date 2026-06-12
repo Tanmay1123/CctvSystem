@@ -1,0 +1,8 @@
+ultralytics
+opencv-python
+flask
+flask-cors
+mediapipe
+requests
+psycopg2-binary
+urllib3

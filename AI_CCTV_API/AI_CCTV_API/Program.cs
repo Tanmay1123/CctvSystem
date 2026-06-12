@@ -4,6 +4,12 @@ using Microsoft.OpenApi.Models;
 using AI_CCTV_API.Hubs;
 using Microsoft.Extensions.FileProviders;
 
+// The "Alerts" table uses `timestamp without time zone` columns and the app stores
+// local DateTime values (DateTime.Now). Npgsql 6+ otherwise maps DateTime to
+// `timestamptz` and rejects non-UTC values. Opt into legacy behavior so local
+// timestamps round-trip correctly.
+AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
+
 var builder = WebApplication.CreateBuilder(args);
 
 // ADD SERVICES

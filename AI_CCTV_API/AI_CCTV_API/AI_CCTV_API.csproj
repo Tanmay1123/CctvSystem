@@ -4,6 +4,9 @@
     <TargetFramework>net8.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Only .NET 10 is installed on this machine; the ASP.NET Core 8 runtime is absent.
+         Allow the net8.0 build to run on the newer installed runtime. -->
+    <RollForward>LatestMajor</RollForward>
   </PropertyGroup>
 
   <ItemGroup>

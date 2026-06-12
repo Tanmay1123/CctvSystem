@@ -13,20 +13,21 @@ import psycopg2
 SENDER_EMAIL = "aniketgaikwad7224@gmail.com"
 SENDER_PASSWORD = "nwwx nfky rfmq olaa"
 
-RECEIVER_EMAIL = "aniket@aitsind.com"
+RECEIVER_EMAIL = ["calude72@gmail.com",
+                  "canvajanvi@gmail.com", "bipulbyadav@gmail.com"]
 
 # -----------------------------------
 # DATABASE SETTINGS
 # -----------------------------------
 
-SERVER_NAME = "DESKTOP-RGPQ74I\SQLEXPRESS"
+SERVER_NAME = r"DESKTOP-RGPQ74I\SQLEXPRESS"
 
 # -----------------------------------
 # OFFICE TIMING
 # -----------------------------------
 
 OFFICE_START_HOUR = 9
-OFFICE_END_HOUR = 0
+OFFICE_END_HOUR = 20
 
 # -----------------------------------
 # LOAD YOLO MODEL
@@ -47,19 +48,21 @@ if not os.path.exists("alerts"):
 # DATABASE CONNECTION
 # -----------------------------------
 
+
 def get_db_connection():
     conn = psycopg2.connect(
         host="localhost",
         port=5432,
         database="AI_CCTV_System",
-        user="postgres",
-        password="tanmay"
+        user="abhishek",
+        password="abhishek"
     )
     return conn
 
 # -----------------------------------
 # SAVE ALERT TO DATABASE
 # -----------------------------------
+
 
 def save_alert_to_db(alert_type, camera_name, screenshot_path):
 
@@ -108,6 +111,7 @@ def save_alert_to_db(alert_type, camera_name, screenshot_path):
 # -----------------------------------
 # SEND EMAIL
 # -----------------------------------
+
 
 def send_email_alert(image_path):
 
@@ -160,6 +164,7 @@ def send_email_alert(image_path):
 # MAIN LOOP
 # -----------------------------------
 
+
 while cap.isOpened():
 
     ret, frame = cap.read()
@@ -204,7 +209,7 @@ while cap.isOpened():
                     frame,
                     (x1, y1),
                     (x2, y2),
-                    (0,255,0),
+                    (0, 255, 0),
                     2
                 )
 
@@ -216,7 +221,7 @@ while cap.isOpened():
                     (x1, y1 - 10),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.7,
-                    (0,255,0),
+                    (0, 255, 0),
                     2
                 )
 
@@ -260,17 +265,17 @@ while cap.isOpened():
     if office_closed:
 
         status = "OFFICE CLOSED"
-        color = (0,0,255)
+        color = (0, 0, 255)
 
     else:
 
         status = "OFFICE OPEN"
-        color = (0,255,0)
+        color = (0, 255, 0)
 
     cv2.putText(
         frame,
         status,
-        (20,40),
+        (20, 40),
         cv2.FONT_HERSHEY_SIMPLEX,
         1,
         color,
