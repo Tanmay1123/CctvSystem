@@ -17,12 +17,6 @@ RECEIVER_EMAIL = ["calude72@gmail.com",
                   "canvajanvi@gmail.com", "bipulbyadav@gmail.com"]
 
 # -----------------------------------
-# DATABASE SETTINGS
-# -----------------------------------
-
-SERVER_NAME = r"DESKTOP-RGPQ74I\SQLEXPRESS"
-
-# -----------------------------------
 # OFFICE TIMING
 # -----------------------------------
 

@@ -1,29 +1,32 @@
-import pyodbc
+import psycopg2
 from datetime import datetime
+
+# Quick PostgreSQL connectivity / insert test for the AI_CCTV_System database.
 
 try:
 
-    conn = pyodbc.connect(
-        'DRIVER={SQL Server};'
-        'SERVER=DESKTOP-RGPQ74I\SQLEXPRESS;'
-        'DATABASE=AI_CCTV_System;'
-        'Trusted_Connection=yes;'
+    conn = psycopg2.connect(
+        host="localhost",
+        port=5432,
+        database="AI_CCTV_System",
+        user="abhishek",
+        password="abhishek"
     )
 
     cursor = conn.cursor()
 
     query = """
-    INSERT INTO Alerts
+    INSERT INTO "Alerts"
     (
-        AlertType,
-        CameraName,
-        AlertTime,
-        ScreenshotPath,
-        Status
+        "AlertType",
+        "CameraName",
+        "AlertTime",
+        "ScreenshotPath",
+        "Status"
     )
     VALUES
     (
-        ?, ?, ?, ?, ?
+        %s, %s, %s, %s, %s
     )
     """
 
