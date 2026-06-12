@@ -4,7 +4,7 @@ import os
 from datetime import datetime
 import smtplib
 from email.message import EmailMessage
-import pyodbc
+import psycopg2
 
 # -----------------------------------
 # EMAIL SETTINGS
@@ -48,16 +48,13 @@ if not os.path.exists("alerts"):
 # -----------------------------------
 
 def get_db_connection():
-
-    conn = pyodbc.connect(
-        f'''
-        DRIVER={{SQL Server}};
-        SERVER={SERVER_NAME};
-        DATABASE=AI_CCTV_System;
-        Trusted_Connection=yes;
-        '''
+    conn = psycopg2.connect(
+        host="localhost",
+        port=5432,
+        database="AI_CCTV_System",
+        user="postgres",
+        password="tanmay"
     )
-
     return conn
 
 # -----------------------------------
@@ -73,17 +70,17 @@ def save_alert_to_db(alert_type, camera_name, screenshot_path):
         cursor = conn.cursor()
 
         query = """
-        INSERT INTO Alerts
+        INSERT INTO "Alerts"
         (
-            AlertType,
-            CameraName,
-            AlertTime,
-            ScreenshotPath,
-            Status
+            "AlertType",
+            "CameraName",
+            "AlertTime",
+            "ScreenshotPath",
+            "Status"
         )
         VALUES
         (
-            ?, ?, ?, ?, ?
+            %s, %s, %s, %s, %s
         )
         """
 
