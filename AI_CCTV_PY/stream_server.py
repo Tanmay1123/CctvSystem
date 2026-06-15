@@ -8,6 +8,7 @@ import shutil
 import time
 import urllib3
 import threading
+from collections import deque
 from datetime import datetime
 import mediapipe as mp
 from mediapipe.tasks import python as mp_python
@@ -56,7 +57,7 @@ FOREHEAD = 10
 # The CAMERA_SOURCE env var can still override this (set it to "0" for a local webcam).
 CAMERA_SOURCE = os.environ.get(
     "CAMERA_SOURCE",
-    "rtsp://admin:Admin2025@192.168.29.89:5543/live/channel1"
+    "rtsp://admin:abhishek@192.168.29.89:5543/live/channel1"
 )
 
 # For RTSP, force TCP transport (more reliable than UDP over Wi-Fi).
@@ -72,6 +73,17 @@ try:
 except Exception:
     pass
 
+# -----------------------------------
+# ALERT VIDEO CLIP SETTINGS
+# -----------------------------------
+# Each alert is delivered as a short video clip (pre + post the event) instead of
+# a single screenshot. CLIP_BUFFER_FRAMES must hold at least PRE+POST seconds of
+# frames; ~20 fps * (PRE+POST+margin). Keep modest so memory stays small on the
+# 640x360 sub-stream.
+CLIP_PRE_SECONDS = 4
+CLIP_POST_SECONDS = 4
+CLIP_BUFFER_FRAMES = 220
+
 
 class FrameGrabber:
     """Continuously reads from the camera in a background thread and keeps ONLY
@@ -85,6 +97,9 @@ class FrameGrabber:
         self.lock = threading.Lock()
         self.frame = None
         self.running = True
+        # Rolling buffer of (timestamp, frame) so an alert can include the few
+        # seconds of footage BEFORE the event, not just the moment it fired.
+        self.buffer = deque(maxlen=CLIP_BUFFER_FRAMES)
         self.thread = threading.Thread(target=self._reader, daemon=True)
         self.thread.start()
 
@@ -96,12 +111,29 @@ class FrameGrabber:
                 continue
             with self.lock:
                 self.frame = f
+                self.buffer.append((time.time(), f))
 
     def read(self):
         with self.lock:
             if self.frame is None:
                 return False, None
             return True, self.frame.copy()
+
+    def snapshot_clip(self, seconds):
+        """Return (frames, fps) for the last `seconds` of footage. fps is derived
+        from the actual frame timestamps so the encoded clip plays back at real
+        time (otherwise the clip's duration metadata won't match its content)."""
+        cutoff = time.time() - seconds
+        with self.lock:
+            items = [(ts, f) for (ts, f) in self.buffer if ts >= cutoff]
+
+        frames = [f for (_, f) in items]
+        if len(items) < 2:
+            return frames, 12.0
+
+        span = items[-1][0] - items[0][0]
+        fps = (len(items) - 1) / span if span > 0 else 12.0
+        return frames, max(5.0, min(30.0, fps))
 
 
 grabber = FrameGrabber(camera)
@@ -119,15 +151,25 @@ RULES = {
 OFFICE_START_HOUR = 9
 OFFICE_END_HOUR = 20
 
-# Testing: 5 seconds. Later change to 120 or 180 seconds.
-SLEEP_SECONDS = 3
+# A person must be inactive (still) for this long to count toward sleeping.
+SLEEP_SECONDS = 5
 MOVEMENT_THRESHOLD = 80
+
+# Head-down detection: nose position within the forehead->chin span.
+# A normal upright face already sits around ~0.60, so the head must drop clearly
+# past this before it counts as "head down". Raise it if you still get false
+# "head down"; lower it if real head-down isn't detected.
+HEAD_DOWN_RATIO = 0.70
+
+# Anti-spam: minimum seconds between two alerts (and emails) of the SAME type.
+ALERT_COOLDOWN_SECONDS = 180
+_last_alert_at = {}
 
 # Local Python alerts folder
 PYTHON_ALERTS_FOLDER = "alerts"
 
 # ASP.NET API wwwroot alerts folder
-API_ALERTS_FOLDER = r"C:\Users\Admin\Desktop\CCTV_AITS\CctvSystem\AI_CCTV_API\AI_CCTV_API\wwwroot\alerts"
+API_ALERTS_FOLDER = r"C:\Users\Admin\Desktop\CCTV_AITS\CctvSystem\AI_CCTV_API\API\wwwroot\alerts"
 
 os.makedirs(PYTHON_ALERTS_FOLDER, exist_ok=True)
 os.makedirs(API_ALERTS_FOLDER, exist_ok=True)
@@ -136,10 +178,10 @@ os.makedirs(API_ALERTS_FOLDER, exist_ok=True)
 alert_sent = False
 last_person_seen_time = 0
 
-# How long (seconds) eyes-closed or head-down must persist while a person is
-# already sitting still before it counts as sleeping.
-SMART_SLEEP_SECONDS = 3
-SMART_HEAD_SECONDS = 3
+# How long (seconds) head-down must persist while a person is already sitting
+# still before it counts as sleeping.
+SMART_SLEEP_SECONDS = 5
+SMART_HEAD_SECONDS = 5
 
 
 def is_office_closed():
@@ -189,24 +231,72 @@ def send_alert_to_api(alert_type, image_url):
 
 
 def create_alert(frame, alert_type):
+    """Kick off clip recording + alert delivery in a background thread so the
+    detection loop is never blocked. The trigger frame (with detection boxes) is
+    saved as the clip's thumbnail/poster.
+
+    A per-type cooldown prevents bombarding the API/email when detection is noisy
+    or several people trigger the same rule in quick succession."""
+    now = time.time()
+    if alert_type != "Test Alert":  # manual tests always go through
+        last = _last_alert_at.get(alert_type, 0)
+        if now - last < ALERT_COOLDOWN_SECONDS:
+            remaining = int(ALERT_COOLDOWN_SECONDS - (now - last))
+            print(f"⏳ {alert_type} suppressed (cooldown {remaining}s left)")
+            return
+        _last_alert_at[alert_type] = now
+
+    thumb = frame.copy()
+    threading.Thread(
+        target=_produce_clip_alert,
+        args=(thumb, alert_type),
+        daemon=True
+    ).start()
+
+
+def _produce_clip_alert(thumb_frame, alert_type):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
     safe_alert_type = alert_type.replace(" ", "_").lower()
+    base = f"{safe_alert_type}_{timestamp}"
 
-    file_name = f"{safe_alert_type}_{timestamp}.jpg"
+    jpg_name = f"{base}.jpg"
+    mp4_name = f"{base}.mp4"
 
-    python_image_path = os.path.join(PYTHON_ALERTS_FOLDER, file_name)
-    api_image_path = os.path.join(API_ALERTS_FOLDER, file_name)
+    # 1) Thumbnail (poster) from the trigger frame
+    cv2.imwrite(os.path.join(PYTHON_ALERTS_FOLDER, jpg_name), thumb_frame)
 
-    cv2.imwrite(python_image_path, frame)
+    # 2) Let the post-event footage accumulate, then pull pre+post from the buffer.
+    #    fps is measured from the real frame timestamps so playback is real-time.
+    time.sleep(CLIP_POST_SECONDS)
+    clip_frames, fps = grabber.snapshot_clip(CLIP_PRE_SECONDS + CLIP_POST_SECONDS)
+    if not clip_frames:
+        clip_frames, fps = [thumb_frame], 12.0
 
-    shutil.copy2(python_image_path, api_image_path)
+    h, w = clip_frames[0].shape[:2]
 
-    image_url = f"http://localhost:5237/alerts/{file_name}"
+    python_mp4 = os.path.join(PYTHON_ALERTS_FOLDER, mp4_name)
 
-    send_alert_to_api(alert_type, image_url)
+    # Prefer H.264 (browser-playable); fall back to mp4v if unavailable.
+    writer = cv2.VideoWriter(python_mp4, cv2.VideoWriter_fourcc(*"avc1"), fps, (w, h))
+    if not writer.isOpened():
+        writer = cv2.VideoWriter(python_mp4, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+    for f in clip_frames:
+        writer.write(f)
+    writer.release()
 
-    print(f"🚨 {alert_type} Alert Sent:", image_url)
+    # 3) Copy both into the API's wwwroot/alerts so they're served + emailed
+    try:
+        shutil.copy2(os.path.join(PYTHON_ALERTS_FOLDER, jpg_name),
+                     os.path.join(API_ALERTS_FOLDER, jpg_name))
+        shutil.copy2(python_mp4, os.path.join(API_ALERTS_FOLDER, mp4_name))
+    except Exception as e:
+        print("Copy to API folder failed:", e)
+
+    # 4) The alert's media is the video clip; the .jpg poster shares its base name
+    clip_url = f"http://localhost:5237/alerts/{mp4_name}"
+    send_alert_to_api(alert_type, clip_url)
+
+    print(f"🚨 {alert_type} clip sent ({len(clip_frames)} frames @ {fps:.0f}fps):", clip_url)
 
 def distance(p1, p2):
     return math.dist(p1, p2)
@@ -256,7 +346,7 @@ def detect_faces(frame):
         forehead_y = int(forehead.y * h)
         face_height = chin_y - forehead_y
         ratio = (nose_y - forehead_y) / face_height if face_height != 0 else 0
-        head_down = ratio > 0.58
+        head_down = ratio > HEAD_DOWN_RATIO
 
         faces.append({
             "nose": (int(nose.x * w), nose_y),
@@ -405,26 +495,25 @@ def generate_frames():
 
             label = "Person"
             if face:
-                label += " | " + ("eyes shut" if face["eyes_closed"] else "eyes open")
+                label += f" | head {face['ratio']:.2f}"
                 if face["head_down"]:
-                    label += " | head down"
+                    label += " DOWN"
             cv2.putText(frame, label, (x1, y1 - 8),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
 
             # Sleeping Detection (per person)
+            # Alert ONLY when the person is BOTH inactive (sitting still) AND has
+            # their head down, each sustained for its threshold. Head-up or moving
+            # => no alert.
             if RULES["sleeping_detection"] and tr["low_start"] is not None:
                 inactive = now - tr["low_start"]
-                eyes_dur = (now - tr["eyes_start"]) if tr["eyes_start"] else 0
                 head_dur = (now - tr["head_start"]) if tr["head_start"] else 0
 
                 cv2.putText(frame, f"Inactive: {int(inactive)}s", (x1, y2 + 22),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
 
-                # Still for SLEEP_SECONDS AND (eyes closed OR head down) long enough.
-                # 'OR' is deliberate: a sleeping person's head is often down, which
-                # hides the eyes from the face mesh, so requiring both rarely fires.
                 if (inactive >= SLEEP_SECONDS
-                        and (eyes_dur >= SMART_SLEEP_SECONDS or head_dur >= SMART_HEAD_SECONDS)
+                        and head_dur >= SMART_HEAD_SECONDS
                         and not tr["sleep_sent"]):
                     create_alert(frame, "Sleeping Detection")
                     tr["sleep_sent"] = True

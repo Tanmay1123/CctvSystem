@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AI CCTV — Activity</title>
+<link rel="stylesheet" href="css/app.css" />
+<style>
+  .chart { display:flex; align-items:flex-end; gap:14px; height:200px; padding:18px; }
+  .bar { flex:1; display:flex; flex-direction:column; align-items:center; gap:8px; height:100%; justify-content:flex-end; }
+  .bar .col { width:60%; max-width:46px; background:var(--blue-soft); border-radius:8px 8px 0 0; position:relative; transition:.3s; }
+  .bar .col span { position:absolute; top:-20px; left:0; right:0; text-align:center; font-size:12px; font-weight:700; color:var(--ink); }
+  .bar .lbl { font-size:11px; color:var(--muted); font-weight:600; }
+  .timeline { padding: 6px 18px 18px; }
+  .ti { display:flex; gap:14px; padding:14px 0; border-bottom:1px solid var(--line); align-items:center; }
+  .ti:last-child { border-bottom:none; }
+  .ti .tdot { width:10px; height:10px; border-radius:50%; flex:none; }
+  .ti .tx { flex:1; }
+  .ti .tx .t { font-weight:700; font-size:14px; }
+  .ti .tx .m { color:var(--muted); font-size:12px; margin-top:2px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar" id="sidebar"></aside>
+  <main class="main">
+    <div class="topbar"><div><h1>Activity</h1><div class="sub">Detection trends &amp; recent events</div></div></div>
+
+    <div class="stats">
+      <div class="stat"><div class="ico blue">🛡️</div><div class="label">Total Alerts</div><div class="value" id="stTotal">0</div></div>
+      <div class="stat"><div class="ico amber">📅</div><div class="label">Today</div><div class="value" id="stToday">0</div></div>
+      <div class="stat"><div class="ico red">🚷</div><div class="label">Intrusions</div><div class="value" id="stIntr">0</div></div>
+      <div class="stat"><div class="ico green">😴</div><div class="label">Sleeping</div><div class="value" id="stSleep">0</div></div>
+    </div>
+
+    <div class="section-title">Alerts — last 7 days</div>
+    <div class="card" style="margin-bottom:24px"><div class="chart" id="chart"></div></div>
+
+    <div class="section-title">Recent Activity</div>
+    <div class="card"><div class="timeline" id="timeline"><div class="empty">Loading…</div></div></div>
+  </main>
+</div>
+
+<script src="js/app.js"></script>
+<script>
+  mountSidebar("activity");
+  const COLORS = { intrusion:"#f0455f", sleeping:"#f5a623", test:"#2f6bff", other:"#2f6bff" };
+
+  function dayKey(d){ return d.toISOString().slice(0,10); }
+
+  function render(alerts){
+    const today = dayKey(new Date());
+    document.getElementById("stTotal").textContent = alerts.length;
+    document.getElementById("stToday").textContent = alerts.filter(a=>dayKey(new Date(a.alertTime||a.createdDate))===today).length;
+    document.getElementById("stIntr").textContent = alerts.filter(a=>typeKey(a.alertType)==="intrusion").length;
+    document.getElementById("stSleep").textContent = alerts.filter(a=>typeKey(a.alertType)==="sleeping").length;
+
+    // last 7 days buckets
+    const days = [];
+    for(let i=6;i>=0;i--){ const d=new Date(); d.setDate(d.getDate()-i); days.push(d); }
+    const counts = days.map(d => alerts.filter(a=>dayKey(new Date(a.alertTime||a.createdDate))===dayKey(d)).length);
+    const max = Math.max(1, ...counts);
+    document.getElementById("chart").innerHTML = days.map((d,i)=>{
+      const h = Math.round((counts[i]/max)*100);
+      return `<div class="bar"><div class="col" style="height:${Math.max(h,2)}%; background:${counts[i]?'#2f6bff':'#eaf0ff'}"><span>${counts[i]||""}</span></div>
+        <div class="lbl">${d.toLocaleDateString(undefined,{weekday:"short"})}</div></div>`;
+    }).join("");
+
+    // timeline (latest 12)
+    const recent = [...alerts].sort((a,b)=>b.alertId-a.alertId).slice(0,12);
+    document.getElementById("timeline").innerHTML = recent.length ? recent.map(a=>{
+      const k = typeKey(a.alertType);
+      return `<div class="ti"><span class="tdot" style="background:${COLORS[k]}"></span>
+        <div class="tx"><div class="t">${a.alertType} · ${a.cameraName||""}</div>
+        <div class="m">${fmt(a.alertTime||a.createdDate)} — ${a.status}</div></div></div>`;
+    }).join("") : `<div class="empty">No activity yet.</div>`;
+  }
+
+  async function load(){ render(await getAlerts()); }
+  load();
+  setInterval(load, 10000);
+</script>
+</body>
+</html>

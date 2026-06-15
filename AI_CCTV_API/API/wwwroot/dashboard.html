@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AI CCTV — Dashboard Control</title>
+<style>
+  :root {
+    --bg: #f3f5f9;
+    --card: #ffffff;
+    --ink: #1f2430;
+    --muted: #8a93a6;
+    --line: #eef1f6;
+    --blue: #2f6bff;
+    --blue-soft: #eaf0ff;
+    --green: #21c17a;
+    --red: #f0455f;
+    --amber: #f5a623;
+    --shadow: 0 6px 24px rgba(31, 36, 48, 0.06);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+  }
+  .app { display: grid; grid-template-columns: 232px 1fr 300px; min-height: 100vh; }
+
+  /* ---------- Sidebar ---------- */
+  .sidebar {
+    background: var(--card);
+    padding: 26px 18px;
+    display: flex; flex-direction: column;
+    border-right: 1px solid var(--line);
+  }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 18px; padding: 0 8px 28px; }
+  .brand .logo { width: 32px; height: 32px; border-radius: 9px; background: var(--blue); display: grid; place-items: center; color: #fff; font-size: 16px; }
+  .nav { display: flex; flex-direction: column; gap: 6px; }
+  .nav a {
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 14px; border-radius: 12px;
+    color: var(--muted); text-decoration: none; font-weight: 600; font-size: 14px;
+    cursor: pointer;
+  }
+  .nav a.active { background: var(--blue); color: #fff; box-shadow: 0 8px 18px rgba(47,107,255,.28); }
+  .nav a:not(.active):hover { background: var(--bg); color: var(--ink); }
+  .nav svg { width: 18px; height: 18px; }
+  .sidebar .spacer { flex: 1; }
+  .logout { display:flex; align-items:center; gap:12px; padding: 12px 14px; color: var(--muted); font-weight:600; font-size:14px; cursor:pointer; }
+
+  /* ---------- Main ---------- */
+  .main { padding: 26px 28px; overflow: auto; }
+  .topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 22px; }
+  .topbar h1 { font-size: 24px; font-weight: 800; }
+  .topbar .right { display: flex; align-items: center; gap: 14px; }
+  .pill { display:flex; align-items:center; gap:8px; background:var(--card); padding:9px 14px; border-radius: 999px; font-size:13px; font-weight:600; box-shadow: var(--shadow); }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  .dot.live { background: var(--green); box-shadow: 0 0 0 4px rgba(33,193,122,.18); }
+  .dot.off { background: var(--red); }
+
+  .section-title { font-size: 16px; font-weight: 800; margin: 8px 2px 14px; }
+
+  /* stats */
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px; }
+  .stat { background: var(--card); border-radius: 16px; padding: 18px; box-shadow: var(--shadow); }
+  .stat .label { color: var(--muted); font-size: 13px; font-weight: 600; }
+  .stat .value { font-size: 30px; font-weight: 800; margin-top: 6px; }
+  .stat .ico { width: 38px; height: 38px; border-radius: 10px; display: grid; place-items: center; float: right; }
+  .ico.blue { background: var(--blue-soft); color: var(--blue); }
+  .ico.red { background: #fde8ec; color: var(--red); }
+  .ico.amber { background: #fdf1dc; color: var(--amber); }
+  .ico.green { background: #e3f7ee; color: var(--green); }
+
+  /* live stream */
+  .live-wrap { background: var(--card); border-radius: 18px; padding: 18px; box-shadow: var(--shadow); margin-bottom: 24px; }
+  .live-grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 20px; }
+  .stream { position: relative; border-radius: 14px; overflow: hidden; background: #0d1018; aspect-ratio: 16/9; }
+  .stream img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .cam-badge { position: absolute; top: 12px; left: 12px; background: rgba(255,255,255,.92); border-radius: 8px; padding: 5px 10px; font-size: 12px; font-weight: 700; display:flex; align-items:center; gap:7px; }
+  .cam-badge .rec { width: 9px; height: 9px; border-radius: 50%; background: var(--red); animation: blink 1.4s infinite; }
+  @keyframes blink { 50% { opacity: .25; } }
+  .stream .offline { position:absolute; inset:0; display:none; flex-direction:column; gap:10px; align-items:center; justify-content:center; color:#aeb6c6; background:#0d1018; text-align:center; padding:20px; }
+  .stream.is-off .offline { display:flex; }
+  .stream.is-off img { visibility:hidden; }
+
+  .cam-panel h3 { font-size: 17px; font-weight: 800; margin-bottom: 4px; }
+  .cam-panel .sub { color: var(--muted); font-size: 13px; margin-bottom: 18px; }
+  .controls { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .ctrl { background: var(--bg); border: none; border-radius: 14px; padding: 16px 8px; display:flex; flex-direction:column; align-items:center; gap:8px; cursor:pointer; color: var(--ink); font-size: 12px; font-weight: 600; transition: .15s; }
+  .ctrl:hover { background: var(--blue-soft); color: var(--blue); }
+  .ctrl svg { width: 24px; height: 24px; }
+  .ctrl.busy { opacity:.5; pointer-events:none; }
+
+  /* alerts feed */
+  .feed-head { display:flex; align-items:center; justify-content:space-between; margin: 6px 2px 14px; }
+  .feed { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px; }
+  .alert-card { background: var(--card); border-radius: 16px; overflow: hidden; box-shadow: var(--shadow); display:flex; flex-direction:column; }
+  .alert-card .thumb { aspect-ratio: 16/10; background:#e9edf4; overflow:hidden; position:relative; }
+  .alert-card .thumb img, .alert-card .thumb video { width:100%; height:100%; object-fit:cover; display:block; background:#0d1018; }
+  .alert-card .badge { position:absolute; top:10px; left:10px; padding:4px 10px; border-radius:999px; font-size:11px; font-weight:700; color:#fff; }
+  .badge.intrusion { background: var(--red); }
+  .badge.sleeping { background: var(--amber); }
+  .badge.test, .badge.other { background: var(--blue); }
+  .alert-card .body { padding: 12px 14px 14px; }
+  .alert-card .body .t { font-weight: 700; font-size: 14px; }
+  .alert-card .body .m { color: var(--muted); font-size: 12px; margin-top: 3px; }
+  .alert-card .body .foot { display:flex; align-items:center; justify-content:space-between; margin-top:12px; }
+  .status { font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 999px; }
+  .status.Open { background:#fde8ec; color: var(--red); }
+  .status.Closed { background:#e3f7ee; color: var(--green); }
+  .btn-close { border:1px solid var(--line); background:#fff; color:var(--ink); font-size:12px; font-weight:600; padding:5px 11px; border-radius:9px; cursor:pointer; }
+  .btn-close:hover { background: var(--bg); }
+  .btn-close[disabled] { opacity:.4; cursor:default; }
+  .btn-del { border:1px solid var(--line); background:#fff; color:var(--red); font-size:13px; padding:5px 9px; border-radius:9px; cursor:pointer; line-height:1; }
+  .btn-del:hover { background:#fde8ec; border-color:#f7c3cd; }
+  .btn-clear { border:1px solid #f7c3cd; background:#fff; color:var(--red); font-size:12px; font-weight:700; padding:7px 14px; border-radius:10px; cursor:pointer; }
+  .btn-clear:hover { background:#fde8ec; }
+  .empty { grid-column: 1/-1; text-align:center; color:var(--muted); padding: 40px; font-size:14px; }
+
+  /* ---------- Right panel ---------- */
+  .right { background: var(--card); border-left: 1px solid var(--line); padding: 26px 20px; }
+  .me { display:flex; align-items:center; gap:10px; margin-bottom: 22px; }
+  .me .av { width:38px; height:38px; border-radius:50%; background:var(--blue); color:#fff; display:grid; place-items:center; font-weight:700; }
+  .me .nm { font-weight:700; font-size:14px; }
+  .me .rl { color:var(--muted); font-size:12px; }
+  .panel-h { font-size: 13px; font-weight: 800; text-transform: uppercase; letter-spacing:.04em; color: var(--muted); margin: 22px 2px 12px; }
+  .toggle-row { display:flex; align-items:center; justify-content:space-between; padding: 11px 2px; }
+  .toggle-row .nm { font-size: 14px; font-weight: 600; }
+  .switch { width: 42px; height: 24px; border-radius: 999px; background:#d8deea; position:relative; cursor:pointer; transition:.18s; flex:none; }
+  .switch::after { content:""; position:absolute; top:3px; left:3px; width:18px; height:18px; border-radius:50%; background:#fff; transition:.18s; box-shadow:0 1px 3px rgba(0,0,0,.2); }
+  .switch.on { background: var(--blue); }
+  .switch.on::after { left:21px; }
+  .quick { display:flex; flex-direction:column; gap:10px; margin-top: 8px; }
+  .quick button { width:100%; border:none; border-radius:12px; padding:12px; font-weight:700; font-size:13px; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:8px; }
+  .quick .primary { background: var(--blue); color:#fff; }
+  .quick .primary:hover { background:#245ae0; }
+  .quick .ghost { background: var(--bg); color: var(--ink); }
+  .quick .ghost:hover { background: var(--blue-soft); color: var(--blue); }
+
+  /* confirm modal */
+  #modal { position: fixed; inset: 0; background: rgba(20,24,33,.45); backdrop-filter: blur(2px); display:none; align-items:center; justify-content:center; z-index: 100; }
+  #modal.show { display:flex; animation: fade .15s ease; }
+  @keyframes fade { from { opacity:0; } }
+  .modal-card { background:#fff; border-radius:18px; padding:26px; width:380px; max-width:90vw; box-shadow:0 24px 60px rgba(0,0,0,.3); animation: pop .18s ease; }
+  @keyframes pop { from { transform: scale(.94); opacity:.6; } }
+  .modal-card .mico { width:52px; height:52px; border-radius:14px; background:#fde8ec; color:var(--red); display:grid; place-items:center; font-size:24px; margin-bottom:16px; }
+  .modal-card h3 { font-size:18px; font-weight:800; margin-bottom:8px; }
+  .modal-card p { color:var(--muted); font-size:14px; line-height:1.5; margin-bottom:22px; }
+  .modal-actions { display:flex; gap:10px; justify-content:flex-end; }
+  .modal-actions button { border:none; border-radius:11px; padding:11px 20px; font-size:14px; font-weight:700; cursor:pointer; }
+  .modal-actions .cancel { background:var(--bg); color:var(--ink); }
+  .modal-actions .cancel:hover { background:#e6eaf2; }
+  .modal-actions .danger { background:var(--red); color:#fff; }
+  .modal-actions .danger:hover { background:#d83b53; }
+
+  /* toast */
+  #toasts { position: fixed; right: 20px; bottom: 20px; display:flex; flex-direction:column; gap:10px; z-index: 50; }
+  .toast { background: var(--ink); color:#fff; padding: 13px 16px; border-radius: 12px; font-size:13px; font-weight:600; box-shadow: 0 10px 30px rgba(0,0,0,.25); display:flex; align-items:center; gap:10px; animation: slideup .25s ease; max-width: 320px; }
+  .toast .tdot { width:9px; height:9px; border-radius:50%; flex:none; }
+  @keyframes slideup { from { transform: translateY(12px); opacity:0; } }
+
+  @media (max-width: 1180px){ .app{ grid-template-columns: 220px 1fr; } .right{ display:none; } .live-grid{ grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ===== Sidebar ===== -->
+  <aside class="sidebar">
+    <div class="brand"><span class="logo">●</span> AI CCTV</div>
+    <nav class="nav">
+      <a class="active" href="dashboard.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg> Dashboard</a>
+      <a href="alerts.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg> Alerts</a>
+      <a href="activity.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg> Activity</a>
+      <a href="devices.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg> Devices</a>
+      <a href="settings.html"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.2.61.78 1 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg> Settings</a>
+    </nav>
+    <div class="spacer"></div>
+    <div class="logout" onclick="logout()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:18px;height:18px"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg> Log Out</div>
+  </aside>
+
+  <!-- ===== Main ===== -->
+  <main class="main">
+    <div class="topbar">
+      <h1>Dashboard Control</h1>
+      <div class="right">
+        <span class="pill"><span id="streamDot" class="dot"></span> <span id="streamTxt">Connecting…</span></span>
+        <span class="pill"><span id="hubDot" class="dot"></span> Realtime</span>
+      </div>
+    </div>
+
+    <!-- stats -->
+    <div class="stats">
+      <div class="stat"><div class="ico blue">🛡️</div><div class="label">Total Alerts</div><div class="value" id="stTotal">0</div></div>
+      <div class="stat"><div class="ico red">⚠️</div><div class="label">Open</div><div class="value" id="stOpen">0</div></div>
+      <div class="stat"><div class="ico amber">🚷</div><div class="label">Intrusions</div><div class="value" id="stIntr">0</div></div>
+      <div class="stat"><div class="ico green">😴</div><div class="label">Sleeping</div><div class="value" id="stSleep">0</div></div>
+    </div>
+
+    <!-- live stream -->
+    <div class="section-title">Live Stream</div>
+    <div class="live-wrap">
+      <div class="live-grid">
+        <div class="stream" id="stream">
+          <div class="cam-badge"><span class="rec"></span> Cam 1 · Main Camera</div>
+          <img id="video" alt="live feed" />
+          <div class="offline">
+            <div style="font-size:30px">📷</div>
+            <div><b>Stream offline</b><br/>The Python engine (port 5000) isn't reachable, or the camera RTSP is off.</div>
+            <button class="btn-close" onclick="reloadStream()" style="margin-top:6px">Retry</button>
+          </div>
+        </div>
+        <div class="cam-panel">
+          <h3>Main Room Camera</h3>
+          <div class="sub">CP&nbsp;Plus Wi‑Fi · RTSP · AI detection</div>
+          <div class="controls">
+            <button class="ctrl" onclick="reloadStream()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.5 9a9 9 0 0 1 14.8-3.4L23 10M1 14l4.7 4.4A9 9 0 0 0 20.5 15"/></svg>Reload</button>
+            <button class="ctrl" onclick="openSnapshot()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>Snapshot</button>
+            <button class="ctrl" onclick="goFullscreen()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>Fullscreen</button>
+            <button class="ctrl" id="btnTest" onclick="fireTestAlert()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>Test Alert</button>
+            <button class="ctrl" onclick="refreshAlerts()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-9-9c2.5 0 4.8 1 6.5 2.6"/><path d="M21 3v6h-6"/></svg>Refresh</button>
+            <button class="ctrl" id="btnSound" onclick="toggleSound()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 5 6 9H2v6h4l5 4z"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg><span id="soundLbl">Sound On</span></button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- alerts -->
+    <div class="feed-head">
+      <div class="section-title" id="feed" style="margin:0">Recent Alerts</div>
+      <div style="display:flex; align-items:center; gap:12px;">
+        <span class="pill" style="box-shadow:none;background:var(--bg)"><span id="feedCount">0</span> shown</span>
+        <button class="btn-clear" onclick="clearAllAlerts()">🗑 Clear All</button>
+      </div>
+    </div>
+    <div class="feed" id="alertFeed"></div>
+  </main>
+
+  <!-- ===== Right panel ===== -->
+  <aside class="right">
+    <div class="me">
+      <div class="av" id="meAvatar">A</div>
+      <div><div class="nm" id="meName">User</div><div class="rl" id="meRole">Member</div></div>
+    </div>
+
+    <div class="panel-h">Alert Filters</div>
+    <div class="toggle-row"><span class="nm">After‑hours Intrusion</span><div class="switch on" data-type="intrusion" onclick="toggleFilter(this)"></div></div>
+    <div class="toggle-row"><span class="nm">Sleeping Detection</span><div class="switch on" data-type="sleeping" onclick="toggleFilter(this)"></div></div>
+    <div class="toggle-row"><span class="nm">Test Alerts</span><div class="switch on" data-type="test" onclick="toggleFilter(this)"></div></div>
+    <div class="toggle-row"><span class="nm">Sound Notifications</span><div class="switch on" id="swSound" onclick="toggleSound()"></div></div>
+
+    <div class="panel-h">Quick Actions</div>
+    <div class="quick">
+      <button class="primary" onclick="fireTestAlert()">＋ Send Test Alert</button>
+      <button class="ghost" onclick="window.open(STREAM_BASE + '/video','_blank')">↗ Open Live Stream</button>
+      <button class="ghost" onclick="window.open('/swagger','_blank')">⚙ API (Swagger)</button>
+    </div>
+
+    <div class="panel-h">Camera</div>
+    <div style="font-size:13px;color:var(--muted);line-height:1.7">
+      <div><b style="color:var(--ink)">Main Camera</b></div>
+      <div>Source: RTSP sub‑stream</div>
+      <div>Engine: <span id="engineState">checking…</span></div>
+    </div>
+  </aside>
+</div>
+
+<div id="toasts"></div>
+
+<div id="modal">
+  <div class="modal-card">
+    <div class="mico">🗑</div>
+    <h3 id="modalTitle">Delete alert?</h3>
+    <p id="modalMsg"></p>
+    <div class="modal-actions">
+      <button class="cancel" id="modalCancel">Cancel</button>
+      <button class="danger" id="modalOk">Delete</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/8.0.7/signalr.min.js"></script>
+<script>
+  // --- auth gate ---
+  const AUTH = JSON.parse(localStorage.getItem("cctv_auth") || "null");
+  if (!AUTH || !AUTH.email) { location.replace("login.html"); }
+  function logout(){ localStorage.removeItem("cctv_auth"); location.replace("login.html"); }
+  if (AUTH && AUTH.email) {
+    document.getElementById("meName").textContent = AUTH.email.split("@")[0];
+    document.getElementById("meRole").textContent = AUTH.role || "Member";
+    document.getElementById("meAvatar").textContent = AUTH.email[0].toUpperCase();
+  }
+
+  // --- config ---
+  const API_BASE = location.origin;                 // same origin as this page (the .NET API)
+  const STREAM_BASE = "http://" + location.hostname + ":5000";  // Python engine
+  let soundOn = true;
+  const hidden = new Set();        // alert types filtered out
+  let alerts = [];                 // cache
+
+  // --- live video ---
+  const video = document.getElementById("video");
+  const streamBox = document.getElementById("stream");
+  function reloadStream() {
+    streamBox.classList.remove("is-off");
+    setStream("Connecting…", "");
+    video.src = STREAM_BASE + "/video?t=" + Date.now();
+  }
+  video.onerror = () => { streamBox.classList.add("is-off"); setStream("Offline", "off"); setEngine(false); };
+  video.onload  = () => { setStream("Live", "live"); setEngine(true); };
+  // MJPEG never fires onload reliably; treat "no error within 4s" as live
+  setTimeout(() => { if (!streamBox.classList.contains("is-off")) { setStream("Live", "live"); setEngine(true); } }, 4000);
+  function setStream(txt, cls){ document.getElementById("streamTxt").textContent = txt; document.getElementById("streamDot").className = "dot " + cls; }
+  function setEngine(ok){ document.getElementById("engineState").textContent = ok ? "online ●" : "offline ●"; }
+
+  function openSnapshot(){ window.open(STREAM_BASE + "/video", "_blank"); }
+  function goFullscreen(){ if (streamBox.requestFullscreen) streamBox.requestFullscreen(); }
+
+  function toggleSound(){
+    soundOn = !soundOn;
+    document.getElementById("soundLbl").textContent = soundOn ? "Sound On" : "Muted";
+    document.getElementById("swSound").classList.toggle("on", soundOn);
+    document.getElementById("btnSound").style.opacity = soundOn ? 1 : .5;
+  }
+
+  function toggleFilter(el){
+    const t = el.dataset.type;
+    el.classList.toggle("on");
+    if (el.classList.contains("on")) hidden.delete(t); else hidden.add(t);
+    render();
+  }
+
+  // --- helpers ---
+  function typeKey(t){ t=(t||"").toLowerCase(); if(t.includes("intrusion"))return"intrusion"; if(t.includes("sleep"))return"sleeping"; if(t.includes("test"))return"test"; return"other"; }
+  function mediaFile(a){
+    if(!a.screenshotPath) return "";
+    return a.screenshotPath.split("/").pop().split("\\").pop();   // bare filename
+  }
+  function mediaUrl(a){ const f = mediaFile(a); return f ? API_BASE + "/alerts/" + f : ""; }
+  function isVideo(a){ return /\.(mp4|webm|avi|mov)$/i.test(mediaFile(a)); }
+  function posterUrl(a){ const f = mediaFile(a); return f ? API_BASE + "/alerts/" + f.replace(/\.[^.]+$/, ".jpg") : ""; }
+  function fmt(ts){ try{ return new Date(ts).toLocaleString(); }catch{ return ts; } }
+
+  // --- render ---
+  function render(){
+    alerts.sort((a,b)=> b.alertId - a.alertId);
+    const shown = alerts.filter(a => !hidden.has(typeKey(a.alertType)));
+    document.getElementById("feedCount").textContent = shown.length;
+
+    // stats (use full set, not filtered)
+    document.getElementById("stTotal").textContent = alerts.length;
+    document.getElementById("stOpen").textContent  = alerts.filter(a=>a.status==="Open").length;
+    document.getElementById("stIntr").textContent  = alerts.filter(a=>typeKey(a.alertType)==="intrusion").length;
+    document.getElementById("stSleep").textContent = alerts.filter(a=>typeKey(a.alertType)==="sleeping").length;
+
+    const feed = document.getElementById("alertFeed");
+    if(!shown.length){ feed.innerHTML = '<div class="empty">No alerts yet. Trigger one with “Send Test Alert”, or wait for a detection.</div>'; return; }
+    feed.innerHTML = shown.map(a => {
+      const k = typeKey(a.alertType);
+      const media = isVideo(a)
+        ? `<video src="${mediaUrl(a)}" poster="${posterUrl(a)}" controls muted preload="metadata" playsinline onerror="this.style.display='none'"></video>`
+        : (mediaUrl(a) ? `<img src="${mediaUrl(a)}" onerror="this.style.display='none'"/>` : "");
+      return `<div class="alert-card">
+        <div class="thumb">
+          <span class="badge ${k}">${a.alertType}${isVideo(a) ? ' ▶' : ''}</span>
+          ${media}
+        </div>
+        <div class="body">
+          <div class="t">${a.cameraName || "Camera"}</div>
+          <div class="m">${fmt(a.alertTime || a.createdDate)}</div>
+          <div class="foot">
+            <span class="status ${a.status}">${a.status}</span>
+            <div style="display:flex; gap:8px;">
+              <button class="btn-close" ${a.status==="Closed"?"disabled":""} onclick="closeAlert(${a.alertId})">
+                ${a.status==="Closed"?"Resolved":"Close"}
+              </button>
+              <button class="btn-del" title="Delete alert" onclick="deleteAlert(${a.alertId})">🗑</button>
+            </div>
+          </div>
+        </div>
+      </div>`;
+    }).join("");
+  }
+
+  // --- data ---
+  async function refreshAlerts(){
+    try{
+      const r = await fetch(API_BASE + "/api/alerts");
+      alerts = await r.json();
+      render();
+    }catch(e){ console.error(e); }
+  }
+  async function closeAlert(id){
+    try{
+      const r = await fetch(`${API_BASE}/api/alerts/${id}/close`, { method:"PUT" });
+      if(r.ok){ const a = alerts.find(x=>x.alertId===id); if(a) a.status="Closed"; render(); toast("Alert #"+id+" closed", "green"); }
+    }catch(e){ toast("Failed to close alert", "red"); }
+  }
+  // in-site confirmation modal -> returns a Promise<boolean>
+  let _modalResolve = null;
+  function confirmDialog({ title, message, okLabel = "Delete" }){
+    document.getElementById("modalTitle").textContent = title;
+    document.getElementById("modalMsg").textContent = message;
+    document.getElementById("modalOk").textContent = okLabel;
+    const modal = document.getElementById("modal");
+    modal.classList.add("show");
+    return new Promise(res => { _modalResolve = res; });
+  }
+  function _closeModal(val){
+    document.getElementById("modal").classList.remove("show");
+    if(_modalResolve){ _modalResolve(val); _modalResolve = null; }
+  }
+  document.getElementById("modalOk").onclick = () => _closeModal(true);
+  document.getElementById("modalCancel").onclick = () => _closeModal(false);
+  document.getElementById("modal").onclick = (e) => { if(e.target.id === "modal") _closeModal(false); };
+  document.addEventListener("keydown", (e) => { if(e.key === "Escape") _closeModal(false); });
+
+  async function deleteAlert(id){
+    const ok = await confirmDialog({
+      title: "Delete this alert?",
+      message: "The alert and its video/screenshot will be removed permanently.",
+      okLabel: "Delete"
+    });
+    if(!ok) return;
+    try{
+      const r = await fetch(`${API_BASE}/api/alerts/${id}`, { method:"DELETE" });
+      if(r.ok){ alerts = alerts.filter(x=>x.alertId!==id); render(); toast("Alert #"+id+" deleted", "amber"); }
+      else toast("Failed to delete alert", "red");
+    }catch(e){ toast("Failed to delete alert", "red"); }
+  }
+  async function clearAllAlerts(){
+    if(!alerts.length){ toast("No alerts to clear", "blue"); return; }
+    const ok = await confirmDialog({
+      title: "Clear all alerts?",
+      message: `All ${alerts.length} alerts and their media will be deleted. This cannot be undone.`,
+      okLabel: "Clear All"
+    });
+    if(!ok) return;
+    try{
+      const r = await fetch(`${API_BASE}/api/alerts`, { method:"DELETE" });
+      if(r.ok){ alerts = []; render(); toast("All alerts cleared", "amber"); }
+      else toast("Failed to clear alerts", "red");
+    }catch(e){ toast("Failed to clear alerts", "red"); }
+  }
+  async function fireTestAlert(){
+    const btn = document.getElementById("btnTest"); btn.classList.add("busy");
+    toast("Sending test alert…", "blue");
+    try{
+      await fetch(STREAM_BASE + "/test-alert");   // engine creates a real alert via the API
+      setTimeout(refreshAlerts, 1200);
+    }catch(e){ toast("Engine (port 5000) not reachable", "red"); }
+    finally{ setTimeout(()=>btn.classList.remove("busy"), 1500); }
+  }
+
+  // --- toast + sound ---
+  function toast(msg, color){
+    const colors = { green:"#21c17a", red:"#f0455f", blue:"#2f6bff", amber:"#f5a623" };
+    const el = document.createElement("div"); el.className="toast";
+    el.innerHTML = `<span class="tdot" style="background:${colors[color]||'#2f6bff'}"></span>${msg}`;
+    document.getElementById("toasts").appendChild(el);
+    setTimeout(()=> el.remove(), 4200);
+  }
+  function beep(){
+    if(!soundOn) return;
+    try{ const c = new (window.AudioContext||window.webkitAudioContext)(); const o=c.createOscillator(); const g=c.createGain();
+      o.connect(g); g.connect(c.destination); o.frequency.value=880; o.type="sine"; g.gain.value=.08; o.start(); o.stop(c.currentTime+.18);
+    }catch{}
+  }
+
+  // --- realtime (SignalR) with polling fallback ---
+  function startHub(){
+    if(!window.signalR){ setHub(false); return; }
+    const conn = new signalR.HubConnectionBuilder().withUrl(API_BASE + "/alerthub").withAutomaticReconnect().build();
+    conn.on("NewAlert", a => { upsert(a); render(); beep(); toast("🚨 " + a.alertType + " — " + (a.cameraName||""), "red"); });
+    conn.on("AlertUpdated", a => { upsert(a); render(); });
+    conn.on("AlertDeleted", id => { alerts = alerts.filter(x=>x.alertId!==id); render(); });
+    conn.on("AlertsCleared", () => { alerts = []; render(); });
+    conn.onreconnected(()=>setHub(true)); conn.onclose(()=>setHub(false));
+    conn.start().then(()=>setHub(true)).catch(()=>setHub(false));
+  }
+  function upsert(a){ const i = alerts.findIndex(x=>x.alertId===a.alertId); if(i>=0) alerts[i]=a; else alerts.unshift(a); }
+  function setHub(ok){ document.getElementById("hubDot").className = "dot " + (ok?"live":"off"); }
+
+  // --- boot ---
+  reloadStream();
+  refreshAlerts();
+  startHub();
+  setInterval(refreshAlerts, 6000);   // polling fallback / stat refresh
+</script>
+</body>
+</html>
