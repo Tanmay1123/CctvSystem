@@ -145,8 +145,28 @@ API_URL = "http://localhost:5237/api/alerts"
 RULES = {
     "after_office_intrusion": True,
     "sleeping_detection": True,
-    "crowd_detection": False
+    "mobile_usage": True,
+    "crowd_detection": True
 }
+
+# -----------------------------------
+# CROWD DETECTION SETTINGS
+# -----------------------------------
+# Fires when at least CROWD_THRESHOLD people are visible in the frame at once,
+# sustained for CROWD_SECONDS (so a group merely walking past doesn't trigger it).
+# CROWD_ACTIVE_MODE controls WHEN the rule is live:
+#   "always"        -> any time
+#   "after_hours"   -> only while the office is closed (see OFFICE_START/END_HOUR)
+#   "working_hours" -> only during office hours
+# Re-alerting while a crowd persists is throttled by ALERT_COOLDOWN_SECONDS.
+CROWD_THRESHOLD = 5
+CROWD_SECONDS = 10
+CROWD_ACTIVE_MODE = "always"
+_crowd_start = None
+
+# A phone must be held near a person for this long (during working hours) before
+# a Mobile Usage alert fires.
+MOBILE_SECONDS = 3
 
 OFFICE_START_HOUR = 9
 OFFICE_END_HOUR = 20
@@ -436,9 +456,19 @@ class PersonTracker:
 
 person_tracker = PersonTracker()
 
+def crowd_rule_active():
+    """Whether the crowd rule should be evaluated right now (per CROWD_ACTIVE_MODE)."""
+    if CROWD_ACTIVE_MODE == "after_hours":
+        return is_office_closed()
+    if CROWD_ACTIVE_MODE == "working_hours":
+        return not is_office_closed()
+    return True  # "always"
+
+
 def generate_frames():
     global alert_sent
     global last_person_seen_time
+    global _crowd_start
 
     while True:
 
@@ -456,13 +486,20 @@ def generate_frames():
         # One face-mesh inference -> per-face eyes/head state for the whole frame
         faces = detect_faces(frame)
 
-        # Collect person boxes from YOLO
+        # Collect person + cell-phone boxes from YOLO (same inference pass)
         person_boxes = []
+        phone_boxes = []
         for result in results:
             for box in result.boxes:
-                if model.names[int(box.cls[0])] == "person":
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                cls = model.names[int(box.cls[0])]
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                if cls == "person":
                     person_boxes.append((x1, y1, x2, y2))
+                elif cls == "cell phone":
+                    phone_boxes.append((x1, y1, x2, y2))
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 255), 2)
+                    cv2.putText(frame, "Phone", (x1, y1 - 6),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
 
         person_count = len(person_boxes)
         person_detected = person_count > 0
@@ -495,6 +532,7 @@ def generate_frames():
 
             label = "Person"
             if face:
+                label += " | " + ("eyes shut" if face["eyes_closed"] else "eyes open")
                 label += f" | head {face['ratio']:.2f}"
                 if face["head_down"]:
                     label += " DOWN"
@@ -502,21 +540,55 @@ def generate_frames():
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
 
             # Sleeping Detection (per person)
-            # Alert ONLY when the person is BOTH inactive (sitting still) AND has
-            # their head down, each sustained for its threshold. Head-up or moving
-            # => no alert.
+            # Requires ALL THREE, each sustained: sitting still + head down +
+            # EYES CLOSED. The eyes-closed gate is what separates real sleeping
+            # from simply working with the head down (e.g. looking at a laptop),
+            # where the eyes stay open.
             if RULES["sleeping_detection"] and tr["low_start"] is not None:
                 inactive = now - tr["low_start"]
                 head_dur = (now - tr["head_start"]) if tr["head_start"] else 0
+                eyes_dur = (now - tr["eyes_start"]) if tr["eyes_start"] else 0
 
                 cv2.putText(frame, f"Inactive: {int(inactive)}s", (x1, y2 + 22),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
 
                 if (inactive >= SLEEP_SECONDS
                         and head_dur >= SMART_HEAD_SECONDS
+                        and eyes_dur >= SMART_SLEEP_SECONDS
                         and not tr["sleep_sent"]):
                     create_alert(frame, "Sleeping Detection")
                     tr["sleep_sent"] = True
+
+            # Mobile Usage Detection (per person) — a phone held by this person
+            # during working hours, sustained for MOBILE_SECONDS. Independent of
+            # the sleeping/inactivity logic, so it never interferes with it.
+            if RULES["mobile_usage"]:
+                tr.setdefault("phone_start", None)
+                tr.setdefault("mobile_sent", False)
+
+                # expand the person box slightly so a phone just in front counts
+                pad = int((x2 - x1) * 0.15)
+                pbox = (x1 - pad, y1 - pad, x2 + pad, y2 + pad)
+                has_phone = any(
+                    box_contains(pbox, ((px1 + px2) // 2, (py1 + py2) // 2))
+                    for (px1, py1, px2, py2) in phone_boxes
+                )
+
+                if has_phone:
+                    if tr["phone_start"] is None:
+                        tr["phone_start"] = now
+                    phone_dur = now - tr["phone_start"]
+                    cv2.putText(frame, f"Phone: {int(phone_dur)}s", (x1, y2 + 44),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
+
+                    if (not is_office_closed()
+                            and phone_dur >= MOBILE_SECONDS
+                            and not tr["mobile_sent"]):
+                        create_alert(frame, "Mobile Usage Detection")
+                        tr["mobile_sent"] = True
+                else:
+                    tr["phone_start"] = None
+                    tr["mobile_sent"] = False
 
         # Intrusion Detection
         if (
@@ -529,6 +601,24 @@ def generate_frames():
             create_alert(frame, "Intrusion")
 
             alert_sent = True
+
+        # Crowd Detection (whole-frame) — at least CROWD_THRESHOLD people present,
+        # sustained for CROWD_SECONDS. Independent of the per-person rules above.
+        if RULES["crowd_detection"] and crowd_rule_active():
+            if person_count >= CROWD_THRESHOLD:
+                if _crowd_start is None:
+                    _crowd_start = now
+                crowd_dur = now - _crowd_start
+                cv2.putText(frame, f"CROWD {person_count} ({int(crowd_dur)}s)",
+                            (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
+                if crowd_dur >= CROWD_SECONDS:
+                    # create_alert's per-type cooldown prevents re-spamming while
+                    # the crowd persists, so no extra "sent" latch is needed here.
+                    create_alert(frame, "Crowd Detection")
+            else:
+                _crowd_start = None
+        else:
+            _crowd_start = None
 
         # Reset intrusion
         if not person_detected and alert_sent:

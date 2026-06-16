@@ -40,7 +40,7 @@ function mountSidebar(active) {
 }
 
 // helpers shared by pages
-function typeKey(t) { t = (t || "").toLowerCase(); if (t.includes("intrusion")) return "intrusion"; if (t.includes("sleep")) return "sleeping"; if (t.includes("test")) return "test"; return "other"; }
+function typeKey(t) { t = (t || "").toLowerCase(); if (t.includes("intrusion")) return "intrusion"; if (t.includes("sleep")) return "sleeping"; if (t.includes("mobile") || t.includes("phone")) return "mobile"; if (t.includes("crowd")) return "crowd"; if (t.includes("test")) return "test"; return "other"; }
 function mediaFile(a) { return a.screenshotPath ? a.screenshotPath.split("/").pop().split("\\").pop() : ""; }
 function mediaUrl(a) { const f = mediaFile(a); return f ? API_BASE + "/alerts/" + f : ""; }
 function isVideo(a) { return /\.(mp4|webm|avi|mov)$/i.test(mediaFile(a)); }

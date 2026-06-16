@@ -209,10 +209,6 @@ namespace AI_CCTV_API.Controllers
                     ? "<img src=\"cid:snapshot\" width=\"100%\" style=\"display:block;border-radius:10px;border:1px solid #eef1f6;\" alt=\"snapshot\"/>"
                     : "";
 
-                var clipLink = !string.IsNullOrEmpty(alert.ScreenshotPath)
-                    ? $"<a href=\"{alert.ScreenshotPath}\" style=\"display:inline-block;margin-top:18px;background:{accent};color:#ffffff;text-decoration:none;font-weight:bold;padding:12px 22px;border-radius:9px;font-size:14px;\">&#9654;&nbsp; View Footage</a>"
-                    : "";
-
                 var html = $@"
 <div style=""background:#f3f5f9;padding:24px;font-family:'Segoe UI',Arial,sans-serif;"">
   <div style=""max-width:460px;margin:0 auto;background:#ffffff;border-radius:14px;overflow:hidden;box-shadow:0 6px 24px rgba(31,36,48,.10);"">
@@ -227,7 +223,7 @@ namespace AI_CCTV_API.Controllers
         <tr><td style=""padding:10px 0;color:#8a93a6;border-top:1px solid #eef1f6;"">Time</td><td style=""padding:10px 0;text-align:right;font-weight:bold;border-top:1px solid #eef1f6;"">{alert.AlertTime:dd MMM yyyy, hh:mm tt}</td></tr>
         <tr><td style=""padding:10px 0;color:#8a93a6;border-top:1px solid #eef1f6;"">Status</td><td style=""padding:10px 0;text-align:right;font-weight:bold;border-top:1px solid #eef1f6;color:{accent};"">{alert.Status}</td></tr>
       </table>
-      {clipLink}
+      <div style=""margin-top:16px;font-size:13px;color:#8a93a6;text-align:center;"">&#128206; Full video clip attached to this email</div>
     </div>
     <div style=""padding:16px 24px;background:#fafbfe;color:#8a93a6;font-size:12px;text-align:center;border-top:1px solid #eef1f6;"">
       Automated alert from your AI CCTV system

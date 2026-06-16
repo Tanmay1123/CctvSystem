@@ -71,6 +71,8 @@ body {
 .badge { padding:3px 10px; border-radius:999px; font-size:11px; font-weight:700; color:#fff; }
 .badge.intrusion { background: var(--red); }
 .badge.sleeping { background: var(--amber); }
+.badge.mobile { background: #a855f7; }
+.badge.crowd { background: #ff7a18; }
 .badge.test, .badge.other { background: var(--blue); }
 
 /* buttons */
