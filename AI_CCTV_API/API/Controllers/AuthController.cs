@@ -59,6 +59,26 @@ namespace AI_CCTV_API.Controllers
             return Ok(new { email = user.Email, role = user.Role, token = NewToken() });
         }
 
+        public record ChangePasswordRequest(string Email, string CurrentPassword, string NewPassword);
+
+        [HttpPost("change-password")]
+        public async Task<IActionResult> ChangePassword(ChangePasswordRequest req)
+        {
+            var email = (req.Email ?? "").Trim().ToLowerInvariant();
+            var user = await _context.Users.FirstOrDefaultAsync(u => u.Email == email);
+
+            if (user == null || !PasswordHasher.Verify(req.CurrentPassword ?? "", user.PasswordHash))
+                return Unauthorized(new { message = "Current password is incorrect." });
+
+            if (string.IsNullOrWhiteSpace(req.NewPassword) || req.NewPassword.Length < 6)
+                return BadRequest(new { message = "New password must be at least 6 characters." });
+
+            user.PasswordHash = PasswordHasher.Hash(req.NewPassword);
+            await _context.SaveChangesAsync();
+
+            return Ok(new { message = "Password updated successfully." });
+        }
+
         private static string NewToken() =>
             Convert.ToBase64String(Guid.NewGuid().ToByteArray());
     }

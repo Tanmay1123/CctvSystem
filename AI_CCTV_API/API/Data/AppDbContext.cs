@@ -13,6 +13,7 @@ namespace AI_CCTV_API.Data
 
         public DbSet<Alert> Alerts { get; set; }
         public DbSet<User> Users { get; set; }
+        public DbSet<Camera> Cameras { get; set; }
     }
 }
 

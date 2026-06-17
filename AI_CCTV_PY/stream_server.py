@@ -63,15 +63,24 @@ CAMERA_SOURCE = os.environ.get(
 # For RTSP, force TCP transport (more reliable than UDP over Wi-Fi).
 if CAMERA_SOURCE.lower().startswith("rtsp://"):
     os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
-    camera = cv2.VideoCapture(CAMERA_SOURCE, cv2.CAP_FFMPEG)
-else:
-    camera = cv2.VideoCapture(int(CAMERA_SOURCE))
 
-# Keep the decoder buffer tiny so we don't accumulate stale frames.
-try:
-    camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-except Exception:
-    pass
+
+def _open_camera():
+    """Open the configured camera source. Called at startup and again by the
+    grabber thread whenever the feed drops, so it reconnects on its own."""
+    if CAMERA_SOURCE.lower().startswith("rtsp://"):
+        cap = cv2.VideoCapture(CAMERA_SOURCE, cv2.CAP_FFMPEG)
+    else:
+        cap = cv2.VideoCapture(int(CAMERA_SOURCE))
+    # Keep the decoder buffer tiny so we don't accumulate stale frames.
+    try:
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    except Exception:
+        pass
+    return cap
+
+
+camera = _open_camera()
 
 # -----------------------------------
 # ALERT VIDEO CLIP SETTINGS
@@ -97,6 +106,9 @@ class FrameGrabber:
         self.lock = threading.Lock()
         self.frame = None
         self.running = True
+        # Timestamp of the last frame we successfully grabbed. Stays put when the
+        # camera is disconnected, which is how /health knows the feed is dead.
+        self.last_ok = 0.0
         # Rolling buffer of (timestamp, frame) so an alert can include the few
         # seconds of footage BEFORE the event, not just the moment it fired.
         self.buffer = deque(maxlen=CLIP_BUFFER_FRAMES)
@@ -107,11 +119,23 @@ class FrameGrabber:
         while self.running:
             ok, f = self.cap.read()
             if not ok:
-                time.sleep(0.01)
+                # Camera dropped / disconnected — try to reopen so it recovers
+                # automatically when it comes back, and leave last_ok stale so
+                # /health reports the feed as offline meanwhile.
+                time.sleep(0.3)
+                try:
+                    self.cap.release()
+                    self.cap = _open_camera()
+                except Exception:
+                    pass
                 continue
             with self.lock:
                 self.frame = f
+                self.last_ok = time.time()
                 self.buffer.append((time.time(), f))
+
+    def seconds_since_frame(self):
+        return time.time() - self.last_ok if self.last_ok else 9999.0
 
     def read(self):
         with self.lock:
@@ -251,9 +275,9 @@ def send_alert_to_api(alert_type, image_url):
 
 
 def create_alert(frame, alert_type):
-    """Kick off clip recording + alert delivery in a background thread so the
+    """Kick off screenshot capture + alert delivery in a background thread so the
     detection loop is never blocked. The trigger frame (with detection boxes) is
-    saved as the clip's thumbnail/poster.
+    saved as a single screenshot.
 
     A per-type cooldown prevents bombarding the API/email when detection is noisy
     or several people trigger the same rule in quick succession."""
@@ -268,55 +292,36 @@ def create_alert(frame, alert_type):
 
     thumb = frame.copy()
     threading.Thread(
-        target=_produce_clip_alert,
+        target=_produce_screenshot_alert,
         args=(thumb, alert_type),
         daemon=True
     ).start()
 
 
-def _produce_clip_alert(thumb_frame, alert_type):
+def _produce_screenshot_alert(thumb_frame, alert_type):
+    """Save a single screenshot (JPG) of the trigger frame and deliver it.
+
+    Video clips are intentionally NOT recorded — they took up far too much disk
+    space. Only a lightweight screenshot is kept per alert."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_alert_type = alert_type.replace(" ", "_").lower()
-    base = f"{safe_alert_type}_{timestamp}"
+    jpg_name = f"{safe_alert_type}_{timestamp}.jpg"
 
-    jpg_name = f"{base}.jpg"
-    mp4_name = f"{base}.mp4"
-
-    # 1) Thumbnail (poster) from the trigger frame
+    # 1) Save the screenshot locally
     cv2.imwrite(os.path.join(PYTHON_ALERTS_FOLDER, jpg_name), thumb_frame)
 
-    # 2) Let the post-event footage accumulate, then pull pre+post from the buffer.
-    #    fps is measured from the real frame timestamps so playback is real-time.
-    time.sleep(CLIP_POST_SECONDS)
-    clip_frames, fps = grabber.snapshot_clip(CLIP_PRE_SECONDS + CLIP_POST_SECONDS)
-    if not clip_frames:
-        clip_frames, fps = [thumb_frame], 12.0
-
-    h, w = clip_frames[0].shape[:2]
-
-    python_mp4 = os.path.join(PYTHON_ALERTS_FOLDER, mp4_name)
-
-    # Prefer H.264 (browser-playable); fall back to mp4v if unavailable.
-    writer = cv2.VideoWriter(python_mp4, cv2.VideoWriter_fourcc(*"avc1"), fps, (w, h))
-    if not writer.isOpened():
-        writer = cv2.VideoWriter(python_mp4, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
-    for f in clip_frames:
-        writer.write(f)
-    writer.release()
-
-    # 3) Copy both into the API's wwwroot/alerts so they're served + emailed
+    # 2) Copy it into the API's wwwroot/alerts so it's served + emailed
     try:
         shutil.copy2(os.path.join(PYTHON_ALERTS_FOLDER, jpg_name),
                      os.path.join(API_ALERTS_FOLDER, jpg_name))
-        shutil.copy2(python_mp4, os.path.join(API_ALERTS_FOLDER, mp4_name))
     except Exception as e:
         print("Copy to API folder failed:", e)
 
-    # 4) The alert's media is the video clip; the .jpg poster shares its base name
-    clip_url = f"http://localhost:5237/alerts/{mp4_name}"
-    send_alert_to_api(alert_type, clip_url)
+    # 3) The alert's media is the screenshot
+    image_url = f"http://localhost:5237/alerts/{jpg_name}"
+    send_alert_to_api(alert_type, image_url)
 
-    print(f"🚨 {alert_type} clip sent ({len(clip_frames)} frames @ {fps:.0f}fps):", clip_url)
+    print(f"📸 {alert_type} screenshot sent:", image_url)
 
 def distance(p1, p2):
     return math.dist(p1, p2)
@@ -662,6 +667,22 @@ def video():
         generate_frames(),
         mimetype="multipart/x-mixed-replace; boundary=frame"
     )
+
+
+# A frame must have arrived within this many seconds for the camera to count as
+# "online". The grabber runs at ~20 fps, so a few seconds of silence means the
+# feed is genuinely disconnected (not just a momentary hiccup).
+HEALTH_FRESH_SECONDS = 4
+
+
+@app.route("/health")
+def health():
+    """Real camera-liveness check used by the .NET monitor. Reports the camera as
+    offline when no fresh frame has arrived (i.e. it's been disconnected),
+    even though this Flask server itself is still running."""
+    ago = grabber.seconds_since_frame()
+    status = "online" if ago < HEALTH_FRESH_SECONDS else "offline"
+    return {"camera": status, "lastFrameAgo": round(ago, 2)}, 200
 
 
 @app.route("/test-alert")

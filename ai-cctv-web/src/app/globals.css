@@ -1,0 +1,63 @@
+@import "tailwindcss";
+
+/* Class-based dark mode (Tailwind v4) */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  /* Brand accent is theme-dependent (overridden in :root / .dark below); this is
+     just the default so Tailwind generates the bg-brand/text-brand/etc utilities. */
+  --color-brand: #2f6bff;
+  --color-brand-light: #5b8bff;
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+}
+
+/* Light mode — royal-blue accent, clean white-on-light-gray (CRM Dash palette). */
+:root {
+  --bg: #f4f6fa;
+  --bg-elev: #ffffff;
+  --card: #ffffff;
+  --border: #eceff4;
+  --text: #1a1f36;
+  --text-muted: #8a93a6;
+  --color-brand: #2f6bff;
+  --color-brand-light: #5b8bff;
+}
+
+/* Dark mode — unchanged (cyan accent). */
+.dark {
+  --bg: #0a0e17;
+  --bg-elev: #0d1220;
+  --card: #121829;
+  --border: #1f2a44;
+  --text: #e6edf7;
+  --text-muted: #8595b0;
+  --color-brand: #06b6d4;
+  --color-brand-light: #22d3ee;
+}
+
+* {
+  border-color: var(--border);
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Utility helpers backed by the theme tokens */
+@layer utilities {
+  .bg-app { background-color: var(--bg); }
+  .bg-elev { background-color: var(--bg-elev); }
+  .bg-card { background-color: var(--card); }
+  .border-app { border-color: var(--border); }
+  .text-main { color: var(--text); }
+  .text-muted { color: var(--text-muted); }
+}
+
+/* Thin scrollbars */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 9999px; }
+::-webkit-scrollbar-thumb:hover { background: #2b3a5e; }
