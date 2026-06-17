@@ -6,3 +6,8 @@ mediapipe
 requests
 psycopg2-binary
 urllib3
+# Face recognition for employee identification + unknown-person intrusion.
+# On Windows this pulls in dlib; if `pip install dlib` fails, install CMake and
+# a prebuilt dlib wheel for your Python version first. Recognition is optional —
+# the system runs fine without it (just no employee names / unknown-intrusion).
+face_recognition

@@ -86,7 +86,18 @@ export default function AiDetectionPage() {
                 <Icon className="w-5 h-5" />
               </div>
               <div className="min-w-0 flex-1">
-                <div className="font-medium truncate">{d.type}</div>
+                <div className="font-medium truncate flex items-center gap-2">
+                  {d.type}
+                  {d.employeeName ? (
+                    <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-brand/10 text-brand">
+                      {d.employeeName} #{d.employeeId}
+                    </span>
+                  ) : d.type.toLowerCase().includes("intrusion") ? (
+                    <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-red-500/10 text-red-500">
+                      Unknown person
+                    </span>
+                  ) : null}
+                </div>
                 <div className="flex items-center gap-3 text-xs text-muted mt-0.5">
                   <span className="flex items-center gap-1"><MapPin className="w-3 h-3" /> {d.camera}</span>
                   <span className="flex items-center gap-1"><Clock className="w-3 h-3" /> {d.time}</span>

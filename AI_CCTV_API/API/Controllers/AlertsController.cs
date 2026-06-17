@@ -189,6 +189,13 @@ namespace AI_CCTV_API.Controllers
                     message.To.Add(addr);
                 }
 
+                // Also notify the recognized employee, if any.
+                if (!string.IsNullOrWhiteSpace(alert.EmployeeEmail) &&
+                    alert.EmployeeEmail.Contains('@'))
+                {
+                    try { message.To.Add(alert.EmployeeEmail.Trim()); } catch { /* ignore bad addr */ }
+                }
+
                 message.Subject = $"\U0001F6A8 AI CCTV Alert — {alert.AlertType}";
                 message.IsBodyHtml = true;
 
@@ -209,6 +216,18 @@ namespace AI_CCTV_API.Controllers
                     ? "<img src=\"cid:snapshot\" width=\"100%\" style=\"display:block;border-radius:10px;border:1px solid #eef1f6;\" alt=\"snapshot\"/>"
                     : "";
 
+                // Identified-employee rows (only when face recognition matched someone).
+                var rowStyle = "padding:10px 0;color:#8a93a6;border-top:1px solid #eef1f6;";
+                var valStyle = "padding:10px 0;text-align:right;font-weight:bold;border-top:1px solid #eef1f6;";
+                var employeeRows = !string.IsNullOrWhiteSpace(alert.EmployeeName)
+                    ? $@"
+        <tr><td style=""{rowStyle}"">Employee</td><td style=""{valStyle}"">{alert.EmployeeName}</td></tr>
+        <tr><td style=""{rowStyle}"">Employee ID</td><td style=""{valStyle}"">#{alert.EmployeeId}</td></tr>
+        <tr><td style=""{rowStyle}"">Employee Email</td><td style=""{valStyle}"">{alert.EmployeeEmail}</td></tr>"
+                    : (type.Contains("intrusion")
+                        ? $@"<tr><td style=""{rowStyle}"">Person</td><td style=""{valStyle}color:#f0455f;"">Unknown (not a registered employee)</td></tr>"
+                        : "");
+
                 var html = $@"
 <div style=""background:#f3f5f9;padding:24px;font-family:'Segoe UI',Arial,sans-serif;"">
   <div style=""max-width:460px;margin:0 auto;background:#ffffff;border-radius:14px;overflow:hidden;box-shadow:0 6px 24px rgba(31,36,48,.10);"">
@@ -222,6 +241,7 @@ namespace AI_CCTV_API.Controllers
         <tr><td style=""padding:10px 0;color:#8a93a6;"">Camera</td><td style=""padding:10px 0;text-align:right;font-weight:bold;"">{alert.CameraName}</td></tr>
         <tr><td style=""padding:10px 0;color:#8a93a6;border-top:1px solid #eef1f6;"">Time</td><td style=""padding:10px 0;text-align:right;font-weight:bold;border-top:1px solid #eef1f6;"">{alert.AlertTime:dd MMM yyyy, hh:mm tt}</td></tr>
         <tr><td style=""padding:10px 0;color:#8a93a6;border-top:1px solid #eef1f6;"">Status</td><td style=""padding:10px 0;text-align:right;font-weight:bold;border-top:1px solid #eef1f6;color:{accent};"">{alert.Status}</td></tr>
+        {employeeRows}
       </table>
       <div style=""margin-top:16px;font-size:13px;color:#8a93a6;text-align:center;"">&#128206; Full video clip attached to this email</div>
     </div>

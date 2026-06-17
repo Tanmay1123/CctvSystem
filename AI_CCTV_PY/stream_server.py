@@ -14,6 +14,7 @@ import mediapipe as mp
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
 import math
+import face_db
 
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -21,7 +22,21 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 app = Flask(__name__)
 CORS(app)
 
-model = YOLO("yolov8n.pt")
+# Load known employee faces for recognition (gracefully disabled if the
+# face_recognition lib / reference photos aren't present).
+face_db.load()
+
+# Detection model. YOLO11 is Ultralytics' newest family (2024) — better accuracy
+# at similar speed to YOLOv8. We prefer yolo11n and fall back to yolov8n if the
+# installed ultralytics is too old to fetch it. Bump to "yolo11s.pt" for even
+# better detection if the machine can spare the CPU/GPU.
+YOLO_MODEL = os.environ.get("YOLO_MODEL", "yolo11n.pt")
+try:
+    model = YOLO(YOLO_MODEL)
+    print(f"YOLO model loaded: {YOLO_MODEL}")
+except Exception as e:
+    print(f"Could not load {YOLO_MODEL} ({e}); falling back to yolov8n.pt")
+    model = YOLO("yolov8n.pt")
 
 # Face landmark detection via MediaPipe Tasks API (the legacy mp.solutions.face_mesh
 # API was removed from the Python 3.13 wheels). Uses the same 478-point face mesh,
@@ -170,8 +185,54 @@ RULES = {
     "after_office_intrusion": True,
     "sleeping_detection": True,
     "mobile_usage": True,
-    "crowd_detection": True
+    "crowd_detection": True,
+    # Flag anyone whose face does NOT match a registered employee as an intrusion.
+    # Requires face recognition to be enabled (employees + face_recognition lib).
+    "unknown_intrusion": True,
 }
+
+# -----------------------------------
+# FACE RECOGNITION (runs in a BACKGROUND thread)
+# -----------------------------------
+# All dlib face recognition runs off the video thread so it never stalls the
+# live feed. The worker recognises faces every RECOG_INTERVAL seconds and the
+# video loop maps those names onto the person tracks (sticky identity).
+RECOG_INTERVAL = 1.0
+# A tracked person must be seen with an UNRECOGNISED face — and never matched to
+# an employee — for this long before being flagged as an intruder. Identity is
+# sticky per person track, so a known employee who briefly fails recognition
+# while moving is NOT re-flagged.
+INTRUDER_MIN_SECONDS = 12
+
+_recog_lock = threading.Lock()
+_recog_boxes = []   # latest [{"name", "id", "center"}] from the worker
+
+
+def _recognition_worker():
+    """Background loop: grab the latest frame, recognise faces, cache the result
+    for the video thread to draw, and raise unknown-person intrusions. Kept fully
+    off the streaming thread so FPS is unaffected by recognition cost."""
+    global _recog_boxes
+    while True:
+        if not face_db.ENABLED:
+            time.sleep(1.0)
+            continue
+        ok, frame = grabber.read()
+        if not ok or frame is None:
+            time.sleep(0.3)
+            continue
+        try:
+            boxes = face_db.recognize_with_boxes(frame)
+        except Exception as e:
+            print("recognition worker error:", e)
+            boxes = []
+
+        with _recog_lock:
+            _recog_boxes = boxes
+
+        # Intrusion is decided per person-track in the video loop (sticky
+        # identity), so the worker only publishes recognised faces here.
+        time.sleep(RECOG_INTERVAL)
 
 # -----------------------------------
 # CROWD DETECTION SETTINGS
@@ -188,16 +249,19 @@ CROWD_SECONDS = 10
 CROWD_ACTIVE_MODE = "always"
 _crowd_start = None
 
-# A phone must be held near a person for this long (during working hours) before
-# a Mobile Usage alert fires.
-MOBILE_SECONDS = 3
+# A phone must be held near a person CONTINUOUSLY for this long (during working
+# hours) before a Mobile Usage alert fires — long enough that a quick reply or
+# glance doesn't trigger it. Raise further if client calls keep alerting.
+MOBILE_SECONDS = 45
 
 OFFICE_START_HOUR = 9
 OFFICE_END_HOUR = 20
 
-# A person must be inactive (still) for this long to count toward sleeping.
-SLEEP_SECONDS = 5
-MOVEMENT_THRESHOLD = 80
+# A person must be inactive (still) for this long before a sleep alert fires.
+SLEEP_SECONDS = 120
+# Max centre-point movement (pixels) between frames to still count as "still".
+# Centre displacement is stable, so this can be a small, meaningful number.
+MOVEMENT_THRESHOLD = 35
 
 # Head-down detection: nose position within the forehead->chin span.
 # A normal upright face already sits around ~0.60, so the head must drop clearly
@@ -222,10 +286,14 @@ os.makedirs(API_ALERTS_FOLDER, exist_ok=True)
 alert_sent = False
 last_person_seen_time = 0
 
-# How long (seconds) head-down must persist while a person is already sitting
-# still before it counts as sleeping.
+# How long (seconds) the sleeping POSTURE must persist (while already sitting
+# still) to confirm sleep: eyes shut, or head down, or — for someone slumped
+# face-down on the desk — the face being hidden from the camera.
 SMART_SLEEP_SECONDS = 5
 SMART_HEAD_SECONDS = 5
+# When a still person's face can't be seen this long, treat it as head-down-on-
+# desk (the classic "asleep at the desk" pose where the face isn't visible).
+FACE_HIDDEN_SECONDS = 8
 
 
 def is_office_closed():
@@ -250,7 +318,7 @@ def calculate_box_movement(old_box, new_box):
     return movement
 
 
-def send_alert_to_api(alert_type, image_url):
+def send_alert_to_api(alert_type, image_url, employee=None):
     try:
         payload = {
             "alertType": alert_type,
@@ -259,6 +327,12 @@ def send_alert_to_api(alert_type, image_url):
             "screenshotPath": image_url,
             "status": "Open"
         }
+
+        # Attach the recognised employee (name / id / email) when available.
+        if employee:
+            payload["employeeName"] = employee.get("name")
+            payload["employeeId"] = employee.get("id")
+            payload["employeeEmail"] = employee.get("email")
 
         response = requests.post(
             API_URL,
@@ -274,10 +348,11 @@ def send_alert_to_api(alert_type, image_url):
         print("API Error:", e)
 
 
-def create_alert(frame, alert_type):
+def create_alert(frame, alert_type, employee=None):
     """Kick off screenshot capture + alert delivery in a background thread so the
     detection loop is never blocked. The trigger frame (with detection boxes) is
-    saved as a single screenshot.
+    saved as a single screenshot. `employee` (optional) carries a recognised
+    employee dict to attach to the alert.
 
     A per-type cooldown prevents bombarding the API/email when detection is noisy
     or several people trigger the same rule in quick succession."""
@@ -293,16 +368,23 @@ def create_alert(frame, alert_type):
     thumb = frame.copy()
     threading.Thread(
         target=_produce_screenshot_alert,
-        args=(thumb, alert_type),
+        args=(thumb, alert_type, employee),
         daemon=True
     ).start()
 
 
-def _produce_screenshot_alert(thumb_frame, alert_type):
+def _produce_screenshot_alert(thumb_frame, alert_type, employee=None):
     """Save a single screenshot (JPG) of the trigger frame and deliver it.
 
     Video clips are intentionally NOT recorded — they took up far too much disk
     space. Only a lightweight screenshot is kept per alert."""
+    # Identify which employee triggered a sleep / mobile alert (runs here, in the
+    # background thread, so the detection loop is never blocked).
+    if employee is None and alert_type in ("Sleeping Detection", "Mobile Usage Detection"):
+        employee = face_db.identify_best(thumb_frame)
+        if employee:
+            print(f"🧑 {alert_type} -> {employee['name']} (#{employee['id']})")
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_alert_type = alert_type.replace(" ", "_").lower()
     jpg_name = f"{safe_alert_type}_{timestamp}.jpg"
@@ -319,7 +401,7 @@ def _produce_screenshot_alert(thumb_frame, alert_type):
 
     # 3) The alert's media is the screenshot
     image_url = f"http://localhost:5237/alerts/{jpg_name}"
-    send_alert_to_api(alert_type, image_url)
+    send_alert_to_api(alert_type, image_url, employee)
 
     print(f"📸 {alert_type} screenshot sent:", image_url)
 
@@ -396,16 +478,39 @@ class PersonTracker:
     which is why the inactivity timer never accumulated in a multi-person scene).
     Each track keeps its own low-movement / eyes-closed / head-down timers."""
 
-    def __init__(self, dist_thresh=120, max_missed=20):
+    def __init__(self, dist_thresh=260, max_missed=60):
         self.tracks = {}
         self.next_id = 0
+        # Larger match radius -> a person who moves fast still maps to the SAME
+        # track instead of spawning a new (identity-less) one.
         self.dist_thresh = dist_thresh
+        # Survive more missed frames before a track is dropped (handles brief
+        # occlusion / detection gaps without losing the locked identity).
         self.max_missed = max_missed
+        # Short-lived memory of recently-seen identities (name + last centre) so a
+        # brand-new track that appears where a known person just was inherits the
+        # identity — keeps the name stuck across track-id churn.
+        self._id_memory = []
 
     @staticmethod
     def _center(box):
         x1, y1, x2, y2 = box
         return ((x1 + x2) / 2, (y1 + y2) / 2)
+
+    # How close (px) and how recent (s) a remembered identity must be to be
+    # inherited by a newly created track.
+    _RECALL_DIST = 320
+    _RECALL_SECONDS = 8.0
+
+    def _recall_identity(self, center, now):
+        best, best_d = None, self._RECALL_DIST
+        for m in self._id_memory:
+            if now - m["t"] > self._RECALL_SECONDS:
+                continue
+            d = math.dist(center, m["center"])
+            if d < best_d:
+                best_d, best = d, m
+        return best["name"] if best else None
 
     def update(self, boxes):
         now = time.time()
@@ -425,15 +530,23 @@ class PersonTracker:
             if best_id is None:
                 tid = self.next_id
                 self.next_id += 1
+                inherited = self._recall_identity(c, now)
                 tr = {"center": c, "box": box, "low_start": None,
                       "eyes_start": None, "head_start": None,
-                      "sleep_sent": False, "missed": 0}
+                      "face_gone_start": None,
+                      "sleep_sent": False, "missed": 0,
+                      # sticky face-recognition identity + intrusion state
+                      "identity": inherited, "unknown_since": None,
+                      "intrusion_sent": False}
                 self.tracks[tid] = tr
                 movement = 999
             else:
                 tid = best_id
                 tr = self.tracks[tid]
-                movement = calculate_box_movement(tr["box"], box)
+                # Use CENTRE displacement — far more stable than summing the four
+                # box corners (which jitters frame-to-frame and falsely resets the
+                # inactivity timer).
+                movement = math.dist(tr["center"], c)
                 tr["center"], tr["box"], tr["missed"] = c, box, 0
 
             # per-person low-movement timer
@@ -441,9 +554,11 @@ class PersonTracker:
                 if tr["low_start"] is None:
                     tr["low_start"] = now
             else:
+                # Genuine movement -> reset inactivity + sleeping posture timers.
                 tr["low_start"] = None
                 tr["eyes_start"] = None
                 tr["head_start"] = None
+                tr["face_gone_start"] = None
                 tr["sleep_sent"] = False
 
             assigned.add(tid)
@@ -454,7 +569,17 @@ class PersonTracker:
             if tid not in assigned:
                 self.tracks[tid]["missed"] += 1
                 if self.tracks[tid]["missed"] > self.max_missed:
+                    t = self.tracks[tid]
+                    # Remember a known identity so a new track that pops up nearby
+                    # inherits it (name stays stuck across track-id changes).
+                    if t.get("identity"):
+                        self._id_memory.append(
+                            {"name": t["identity"], "center": t["center"], "t": now})
                     del self.tracks[tid]
+
+        # Keep only fresh identity memories.
+        self._id_memory = [m for m in self._id_memory
+                           if now - m["t"] <= self._RECALL_SECONDS]
 
         return out
 
@@ -514,25 +639,85 @@ def generate_frames():
         # Track each person across frames so movement is per-person
         tracked = person_tracker.update(person_boxes)
 
+        # Snapshot the latest recognised names (computed in the background worker).
+        with _recog_lock:
+            recog_boxes = list(_recog_boxes)
+
         for tid, box, tr in tracked:
             x1, y1, x2, y2 = box
 
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
+            # ---- Sticky identity + unknown-person intrusion ----
+            tr.setdefault("identity", None)
+            tr.setdefault("unknown_since", None)
+            tr.setdefault("intrusion_sent", False)
+
+            # Which recognised face (if any) falls inside this person's box?
+            matched_name = None
+            for r in recog_boxes:
+                cx, cy = r["center"]
+                if x1 <= cx <= x2 and y1 <= cy <= y2:
+                    matched_name = r["name"]
+                    break
+
+            if matched_name and matched_name != "Unknown":
+                # First confident match LOCKS the identity for this person. It is
+                # never overwritten afterwards, so it can't flip to another name
+                # or back to "Unknown" while they move around.
+                if tr["identity"] is None:
+                    tr["identity"] = matched_name
+                tr["unknown_since"] = None
+            elif matched_name == "Unknown" and tr["identity"] is None:
+                # Seen but not matched to anyone known -> start the intruder clock.
+                if tr["unknown_since"] is None:
+                    tr["unknown_since"] = now
+
+            # Fire an intrusion only for someone NEVER recognised as an employee
+            # who has lingered with an unknown face long enough.
+            if (RULES["unknown_intrusion"] and tr["identity"] is None
+                    and tr["unknown_since"] is not None
+                    and (now - tr["unknown_since"]) >= INTRUDER_MIN_SECONDS
+                    and not tr["intrusion_sent"]):
+                create_alert(frame, "Intrusion")
+                tr["intrusion_sent"] = True
+
+            # Name banner: prefer the sticky identity so it doesn't flicker.
+            display_name = tr["identity"] or matched_name
+            if display_name:
+                is_unknown = display_name == "Unknown"
+                name_color = (0, 0, 255) if is_unknown else (0, 220, 0)
+                (tw, th), _ = cv2.getTextSize(display_name, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+                cv2.rectangle(frame, (x1, y1 - th - 30), (x1 + tw + 12, y1 - 24),
+                              name_color, -1)
+                cv2.putText(frame, display_name, (x1 + 6, y1 - 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
             # Associate a face (whose nose falls inside this person's box)
             face = next((f for f in faces if box_contains(box, f["nose"])), None)
 
-            # Per-person eyes/head timers (only meaningful while sitting still)
-            if face and tr["low_start"] is not None:
-                if face["eyes_closed"]:
-                    if tr["eyes_start"] is None:
-                        tr["eyes_start"] = now
+            # Per-person eyes/head/face-hidden timers (only while sitting still)
+            tr.setdefault("face_gone_start", None)
+            if tr["low_start"] is not None:
+                if face:
+                    # Face visible -> not hidden; track eyes/head posture.
+                    tr["face_gone_start"] = None
+                    if face["eyes_closed"]:
+                        if tr["eyes_start"] is None:
+                            tr["eyes_start"] = now
+                    else:
+                        tr["eyes_start"] = None
+                    if face["head_down"]:
+                        if tr["head_start"] is None:
+                            tr["head_start"] = now
+                    else:
+                        tr["head_start"] = None
                 else:
+                    # Still person but no face visible -> likely slumped face-down
+                    # on the desk. Start/continue the "face hidden" timer.
+                    if tr["face_gone_start"] is None:
+                        tr["face_gone_start"] = now
                     tr["eyes_start"] = None
-                if face["head_down"]:
-                    if tr["head_start"] is None:
-                        tr["head_start"] = now
-                else:
                     tr["head_start"] = None
 
             label = "Person"
@@ -545,21 +730,28 @@ def generate_frames():
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
 
             # Sleeping Detection (per person)
-            # Requires ALL THREE, each sustained: sitting still + head down +
-            # EYES CLOSED. The eyes-closed gate is what separates real sleeping
-            # from simply working with the head down (e.g. looking at a laptop),
-            # where the eyes stay open.
+            # Primary gate: the person has been essentially MOTIONLESS for
+            # SLEEP_SECONDS (120s). On top of that we require a sleeping posture,
+            # satisfied by ANY of: eyes shut, head down, or face hidden (slumped
+            # face-down on the desk). The face-hidden case is what lets us catch
+            # "asleep at the desk" where the eyes/face aren't visible at all.
             if RULES["sleeping_detection"] and tr["low_start"] is not None:
                 inactive = now - tr["low_start"]
                 head_dur = (now - tr["head_start"]) if tr["head_start"] else 0
                 eyes_dur = (now - tr["eyes_start"]) if tr["eyes_start"] else 0
+                face_gone_dur = (now - tr["face_gone_start"]) if tr["face_gone_start"] else 0
 
                 cv2.putText(frame, f"Inactive: {int(inactive)}s", (x1, y2 + 22),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
 
+                posture_sleep = (
+                    eyes_dur >= SMART_SLEEP_SECONDS
+                    or head_dur >= SMART_HEAD_SECONDS
+                    or face_gone_dur >= FACE_HIDDEN_SECONDS
+                )
+
                 if (inactive >= SLEEP_SECONDS
-                        and head_dur >= SMART_HEAD_SECONDS
-                        and eyes_dur >= SMART_SLEEP_SECONDS
+                        and posture_sleep
                         and not tr["sleep_sent"]):
                     create_alert(frame, "Sleeping Detection")
                     tr["sleep_sent"] = True
@@ -595,7 +787,7 @@ def generate_frames():
                     tr["phone_start"] = None
                     tr["mobile_sent"] = False
 
-        # Intrusion Detection
+        # Intrusion Detection (after office hours, anyone present)
         if (
             RULES["after_office_intrusion"]
             and is_office_closed()
@@ -606,6 +798,9 @@ def generate_frames():
             create_alert(frame, "Intrusion")
 
             alert_sent = True
+
+        # (Unknown-person intrusion is handled in the background recognition
+        #  worker so it doesn't slow the live feed.)
 
         # Crowd Detection (whole-frame) — at least CROWD_THRESHOLD people present,
         # sustained for CROWD_SECONDS. Independent of the per-person rules above.
@@ -645,6 +840,16 @@ def generate_frames():
             (255, 255, 0),
             2
         )
+
+        # Live face-recognition status (helps diagnose name labels).
+        if face_db.ENABLED:
+            fr_status = f"FaceRec ON | {len(recog_boxes)} face(s) recognised"
+            fr_color = (0, 255, 255)
+        else:
+            fr_status = "FaceRec OFF (no photos / lib not loaded - restart server)"
+            fr_color = (0, 0, 255)
+        cv2.putText(frame, fr_status, (20, frame.shape[0] - 15),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, fr_color, 2)
 
         ret, buffer = cv2.imencode(".jpg", frame)
 
@@ -700,6 +905,10 @@ def test_alert():
 
     create_alert(frame, "Test Alert")
     return {"status": "ok", "message": "Test alert sent to API"}, 200
+
+
+# Start the background face-recognition worker (no-op work while disabled).
+threading.Thread(target=_recognition_worker, daemon=True).start()
 
 
 if __name__ == "__main__":

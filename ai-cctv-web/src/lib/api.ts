@@ -28,6 +28,9 @@ export interface ApiAlert {
   screenshotPath: string | null;
   status: string;
   createdDate: string;
+  employeeName?: string | null;
+  employeeId?: number | null;
+  employeeEmail?: string | null;
 }
 
 function timeAgo(iso: string): string {
@@ -47,6 +50,8 @@ export type DisplayAlert = AlertItem & {
   confidence: number | null;
   screenshot: string | null;
   isVideo: boolean;
+  employeeName: string | null;
+  employeeId: number | null;
 };
 
 export function mapAlert(a: ApiAlert): DisplayAlert {
@@ -64,6 +69,8 @@ export function mapAlert(a: ApiAlert): DisplayAlert {
     confidence: null,
     screenshot: media,
     isVideo: !!media && /\.mp4($|\?)/i.test(media),
+    employeeName: a.employeeName ?? null,
+    employeeId: a.employeeId ?? null,
   };
 }
 

@@ -72,6 +72,23 @@ using (var scope = app.Services.CreateScope())
         db.SaveChanges();
     }
 
+    // Ensure the Alerts table exists and has the employee (face-recognition)
+    // columns. ADD COLUMN IF NOT EXISTS keeps it safe on an existing table.
+    db.Database.ExecuteSqlRaw(@"
+        CREATE TABLE IF NOT EXISTS ""Alerts"" (
+            ""AlertId""        SERIAL PRIMARY KEY,
+            ""AlertType""      VARCHAR(200),
+            ""CameraName""     VARCHAR(200),
+            ""AlertTime""      TIMESTAMP,
+            ""ScreenshotPath"" VARCHAR(500),
+            ""Status""         VARCHAR(50),
+            ""CreatedDate""    TIMESTAMP
+        );
+        ALTER TABLE ""Alerts"" ADD COLUMN IF NOT EXISTS ""EmployeeName""  VARCHAR(200);
+        ALTER TABLE ""Alerts"" ADD COLUMN IF NOT EXISTS ""EmployeeId""    INTEGER;
+        ALTER TABLE ""Alerts"" ADD COLUMN IF NOT EXISTS ""EmployeeEmail"" VARCHAR(200);
+    ");
+
     // Cameras table (manual-SQL pattern, same as Users above).
     db.Database.ExecuteSqlRaw(@"
         CREATE TABLE IF NOT EXISTS ""Cameras"" (
