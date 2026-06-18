@@ -50,7 +50,7 @@ face_landmarker = mp_vision.FaceLandmarker.create_from_options(
     mp_vision.FaceLandmarkerOptions(
         base_options=mp_python.BaseOptions(model_asset_path=FACE_LANDMARKER_MODEL),
         running_mode=mp_vision.RunningMode.IMAGE,
-        num_faces=5,
+        num_faces=3,
         min_face_detection_confidence=0.5,
         min_tracking_confidence=0.5
     )
@@ -478,39 +478,20 @@ class PersonTracker:
     which is why the inactivity timer never accumulated in a multi-person scene).
     Each track keeps its own low-movement / eyes-closed / head-down timers."""
 
-    def __init__(self, dist_thresh=260, max_missed=60):
+    def __init__(self, dist_thresh=150, max_missed=40):
         self.tracks = {}
         self.next_id = 0
-        # Larger match radius -> a person who moves fast still maps to the SAME
-        # track instead of spawning a new (identity-less) one.
+        # Moderate match radius: big enough to follow normal movement, small
+        # enough that two different people don't get swapped onto each other's
+        # track (which would mix up their identities).
         self.dist_thresh = dist_thresh
-        # Survive more missed frames before a track is dropped (handles brief
-        # occlusion / detection gaps without losing the locked identity).
+        # Survive brief detection gaps / occlusion without dropping the track.
         self.max_missed = max_missed
-        # Short-lived memory of recently-seen identities (name + last centre) so a
-        # brand-new track that appears where a known person just was inherits the
-        # identity — keeps the name stuck across track-id churn.
-        self._id_memory = []
 
     @staticmethod
     def _center(box):
         x1, y1, x2, y2 = box
         return ((x1 + x2) / 2, (y1 + y2) / 2)
-
-    # How close (px) and how recent (s) a remembered identity must be to be
-    # inherited by a newly created track.
-    _RECALL_DIST = 320
-    _RECALL_SECONDS = 8.0
-
-    def _recall_identity(self, center, now):
-        best, best_d = None, self._RECALL_DIST
-        for m in self._id_memory:
-            if now - m["t"] > self._RECALL_SECONDS:
-                continue
-            d = math.dist(center, m["center"])
-            if d < best_d:
-                best_d, best = d, m
-        return best["name"] if best else None
 
     def update(self, boxes):
         now = time.time()
@@ -530,14 +511,13 @@ class PersonTracker:
             if best_id is None:
                 tid = self.next_id
                 self.next_id += 1
-                inherited = self._recall_identity(c, now)
                 tr = {"center": c, "box": box, "low_start": None,
                       "eyes_start": None, "head_start": None,
                       "face_gone_start": None,
                       "sleep_sent": False, "missed": 0,
-                      # sticky face-recognition identity + intrusion state
-                      "identity": inherited, "unknown_since": None,
-                      "intrusion_sent": False}
+                      # face-recognition: per-track vote tally -> identity
+                      "id_votes": {}, "identity": None,
+                      "unknown_since": None, "intrusion_sent": False}
                 self.tracks[tid] = tr
                 movement = 999
             else:
@@ -569,17 +549,7 @@ class PersonTracker:
             if tid not in assigned:
                 self.tracks[tid]["missed"] += 1
                 if self.tracks[tid]["missed"] > self.max_missed:
-                    t = self.tracks[tid]
-                    # Remember a known identity so a new track that pops up nearby
-                    # inherits it (name stays stuck across track-id changes).
-                    if t.get("identity"):
-                        self._id_memory.append(
-                            {"name": t["identity"], "center": t["center"], "t": now})
                     del self.tracks[tid]
-
-        # Keep only fresh identity memories.
-        self._id_memory = [m for m in self._id_memory
-                           if now - m["t"] <= self._RECALL_SECONDS]
 
         return out
 
@@ -648,7 +618,8 @@ def generate_frames():
 
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-            # ---- Sticky identity + unknown-person intrusion ----
+            # ---- Vote-based identity + unknown-person intrusion ----
+            tr.setdefault("id_votes", {})
             tr.setdefault("identity", None)
             tr.setdefault("unknown_since", None)
             tr.setdefault("intrusion_sent", False)
@@ -662,27 +633,30 @@ def generate_frames():
                     break
 
             if matched_name and matched_name != "Unknown":
-                # First confident match LOCKS the identity for this person. It is
-                # never overwritten afterwards, so it can't flip to another name
-                # or back to "Unknown" while they move around.
-                if tr["identity"] is None:
-                    tr["identity"] = matched_name
+                # Tally a vote for this name. The most-voted name wins, so a
+                # single mis-matched frame can't hijack the label, and it stays
+                # stable (and correct) as the person moves.
+                tr["id_votes"][matched_name] = tr["id_votes"].get(matched_name, 0) + 1
                 tr["unknown_since"] = None
-            elif matched_name == "Unknown" and tr["identity"] is None:
-                # Seen but not matched to anyone known -> start the intruder clock.
+            elif matched_name == "Unknown" and not tr["id_votes"]:
+                # Seen but never matched to anyone known -> start the intruder clock.
                 if tr["unknown_since"] is None:
                     tr["unknown_since"] = now
 
-            # Fire an intrusion only for someone NEVER recognised as an employee
-            # who has lingered with an unknown face long enough.
-            if (RULES["unknown_intrusion"] and tr["identity"] is None
+            # Identity = the name this track has been recognised as most often.
+            tr["identity"] = (max(tr["id_votes"], key=tr["id_votes"].get)
+                              if tr["id_votes"] else None)
+
+            # Intrusion only for someone NEVER recognised as an employee who has
+            # lingered with an unknown face long enough.
+            if (RULES["unknown_intrusion"] and not tr["id_votes"]
                     and tr["unknown_since"] is not None
                     and (now - tr["unknown_since"]) >= INTRUDER_MIN_SECONDS
                     and not tr["intrusion_sent"]):
                 create_alert(frame, "Intrusion")
                 tr["intrusion_sent"] = True
 
-            # Name banner: prefer the sticky identity so it doesn't flicker.
+            # Name banner: voted identity (falls back to the current match).
             display_name = tr["identity"] or matched_name
             if display_name:
                 is_unknown = display_name == "Unknown"
@@ -753,7 +727,9 @@ def generate_frames():
                 if (inactive >= SLEEP_SECONDS
                         and posture_sleep
                         and not tr["sleep_sent"]):
-                    create_alert(frame, "Sleeping Detection")
+                    # Use the locked track identity so the alert/email names them.
+                    emp = face_db.get_by_name(tr.get("identity"))
+                    create_alert(frame, "Sleeping Detection", emp)
                     tr["sleep_sent"] = True
 
             # Mobile Usage Detection (per person) — a phone held by this person
@@ -781,7 +757,9 @@ def generate_frames():
                     if (not is_office_closed()
                             and phone_dur >= MOBILE_SECONDS
                             and not tr["mobile_sent"]):
-                        create_alert(frame, "Mobile Usage Detection")
+                        # Use the locked track identity so the alert/email names them.
+                        emp = face_db.get_by_name(tr.get("identity"))
+                        create_alert(frame, "Mobile Usage Detection", emp)
                         tr["mobile_sent"] = True
                 else:
                     tr["phone_start"] = None
@@ -851,7 +829,9 @@ def generate_frames():
         cv2.putText(frame, fr_status, (20, frame.shape[0] - 15),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, fr_color, 2)
 
-        ret, buffer = cv2.imencode(".jpg", frame)
+        # Lower JPEG quality -> much smaller frames -> faster encode + network
+        # transfer -> noticeably less latency, with little visible quality loss.
+        ret, buffer = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
 
         if not ret:
             continue

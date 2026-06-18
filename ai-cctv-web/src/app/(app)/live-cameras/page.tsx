@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Maximize2, Grid2x2, Grid3x3, Video, MapPin, WifiOff } from "lucide-react";
+import { Maximize2, Grid2x2, Grid3x3, Video, MapPin, WifiOff, X } from "lucide-react";
 import { Card, FilterTabs } from "@/components/ui";
 import { getCameras, type ApiCamera } from "@/lib/api";
 import { useFetch } from "@/lib/use-fetch";
@@ -64,7 +64,16 @@ function CameraFeed({ cam }: { cam: ApiCamera }) {
 export default function LiveCamerasPage() {
   const [tab, setTab] = useState<Tab>("all");
   const [cols, setCols] = useState<2 | 3>(3);
+  const [fsCam, setFsCam] = useState<ApiCamera | null>(null);
   const { data: cameras, loading, error, reload } = useFetch<ApiCamera[]>(getCameras);
+
+  // Close the fullscreen view on Escape.
+  useEffect(() => {
+    if (!fsCam) return;
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setFsCam(null);
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [fsCam]);
 
   // Poll so a camera going offline (detected by the backend monitor) flips the
   // status here without a manual refresh.
@@ -122,8 +131,12 @@ export default function LiveCamerasPage() {
       {!error && (
         <div
           className={cn(
-            "grid gap-4",
-            cols === 2 ? "grid-cols-1 sm:grid-cols-2" : "grid-cols-1 sm:grid-cols-2 xl:grid-cols-3"
+            // Fixed column counts so the 2x2 / 3x3 toggle always has a visible
+            // effect (auto-fit hid it when only a camera or two were present).
+            "grid gap-5",
+            cols === 2
+              ? "grid-cols-1 md:grid-cols-2"
+              : "grid-cols-1 md:grid-cols-2 xl:grid-cols-3"
           )}
         >
           {filtered.map((cam) => {
@@ -139,7 +152,11 @@ export default function LiveCamerasPage() {
                     </div>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
-                    <button className="grid place-items-center w-8 h-8 rounded-lg text-muted hover:bg-app hover:text-main transition-colors">
+                    <button
+                      onClick={() => setFsCam(cam)}
+                      title="Fullscreen"
+                      className="grid place-items-center w-8 h-8 rounded-lg text-muted hover:bg-app hover:text-main transition-colors"
+                    >
                       <Maximize2 className="w-4 h-4" />
                     </button>
                     <span
@@ -164,6 +181,48 @@ export default function LiveCamerasPage() {
           <Video className="w-8 h-8 mb-2 opacity-40" />
           No cameras in this view.
         </Card>
+      )}
+
+      {/* Fullscreen camera overlay */}
+      {fsCam && (
+        <div
+          className="fixed inset-0 z-50 bg-black/90 flex flex-col"
+          onClick={() => setFsCam(null)}
+        >
+          <div className="flex items-center justify-between px-5 h-14 text-white shrink-0">
+            <div>
+              <div className="text-sm font-semibold">{fsCam.name}</div>
+              <div className="text-xs text-white/60 flex items-center gap-1">
+                <MapPin className="w-3 h-3" /> {fsCam.location}
+              </div>
+            </div>
+            <button
+              onClick={() => setFsCam(null)}
+              className="grid place-items-center w-9 h-9 rounded-lg text-white/80 hover:bg-white/10"
+              title="Close (Esc)"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+          <div
+            className="flex-1 grid place-items-center p-4 min-h-0"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {fsCam.status === "online" && fsCam.streamUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={fsCam.streamUrl}
+                alt={fsCam.name}
+                className="max-w-full max-h-full object-contain rounded-lg"
+              />
+            ) : (
+              <div className="text-center text-white/70">
+                <WifiOff className="w-10 h-10 mx-auto mb-2 opacity-60" />
+                <div className="font-semibold text-red-400">NO SIGNAL</div>
+              </div>
+            )}
+          </div>
+        </div>
       )}
     </div>
   );

@@ -111,6 +111,17 @@ def _match(enc):
     return {"id": best["id"], "name": best["name"], "email": best["email"]}
 
 
+def get_by_name(name):
+    """Return {"id","name","email"} for a known employee by name, or None.
+    Used to attach the already-locked track identity to an alert."""
+    if not name:
+        return None
+    for k in _known:
+        if k["name"] == name:
+            return {"id": k["id"], "name": k["name"], "email": k["email"]}
+    return None
+
+
 def identify_best(frame_bgr):
     """Best-matching employee for the most clearly recognised face in the frame,
     or None. Safe to call when recognition is disabled (returns None)."""
