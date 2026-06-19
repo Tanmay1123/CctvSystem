@@ -1,0 +1,16 @@
+# ── OS / editor junk ──────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# ── Secrets ───────────────────────────────────────────────────
+*.local
+.env
+.env.local
+
+# Per-project ignores live in:
+#   backend/.gitignore    (.NET build output, secrets, alerts)
+#   ai-engine/.gitignore  (venv, __pycache__, alerts)
+#   frontend/.gitignore   (node_modules, .next build output)

@@ -1,0 +1,70 @@
+# Build folders
+bin/
+obj/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Rider / VS Code
+.idea/
+.vscode/
+
+# NuGet
+packages/
+*.nupkg
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.cache
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Publish folders
+publish/
+PublishProfiles/
+
+# IIS Express
+/.vs/config/
+
+# Secrets
+appsettings.Local.json
+appsettings.*.local.json
+secrets.json
+
+# Runtime-generated detection output (keep the folder, ignore the media)
+src/wwwroot/alerts/*
+!src/wwwroot/alerts/.gitkeep
+
+# EF Core migrations bundle
+bundle/
+
+# Node modules (if frontend exists inside same repo)
+node_modules/
+
+# Python virtual environment (if AI scripts are included)
+venv/
+.venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Test results
+TestResults/
+
+# Coverage files
+coverage/
+*.coverage
+
+# Generated files
+Generated/

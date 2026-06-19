@@ -1,312 +1,130 @@
-# AI CCTV System — Setup Guide
+# AI CCTV System
 
-This project uses **PostgreSQL** for the database, **.NET 8** for the API, **Python 3.11** for the AI engine, and **Angular** for the frontend.
+An AI-powered CCTV monitoring system that runs object/behaviour detection on a
+camera feed and surfaces alerts (intrusion, crowding, sleeping, mobile-phone
+usage, …) through a web dashboard in real time.
 
----
+## Architecture
+
+The repo is a small monorepo of three independent services:
+
+| Folder | Stack | Role |
+|---|---|---|
+| [`backend/`](backend/) | .NET 8 Web API + SignalR + EF Core | REST API + real-time alert hub, backed by PostgreSQL. Serves alert screenshots from `wwwroot/alerts`. The .NET project lives in [`backend/src`](backend/src). |
+| [`ai-engine/`](ai-engine/) | Python 3.11 + Flask + Ultralytics YOLO + MediaPipe | The AI engine. Reads the camera, runs detection, streams the annotated video, and POSTs alerts to the API. |
+| [`frontend/`](frontend/) | Next.js + TypeScript + Tailwind | The web dashboard (live cameras, alerts, analytics, user/camera management). |
+
+Data flow:
+
+```
+camera ──▶ ai-engine (stream_server.py)
+                │  POST alert + screenshot
+                ▼
+          backend (:5237) ──▶ PostgreSQL
+                │  REST + SignalR (/alerthub)
+                ▼
+          frontend (:3001)  ◀── browser
+```
 
 ## Prerequisites
 
-Install all of these before starting:
+| Tool | Version |
+|---|---|
+| Python | **3.11** |
+| .NET SDK | **8** |
+| Node.js + npm | LTS |
+| PostgreSQL | Any recent |
 
-| Tool | Version | Download |
+## Setup
+
+### 1. Database
+
+Create an empty PostgreSQL database named `AI_CCTV_System`. The API creates its
+tables and seeds the default admin/camera on first startup — **no manual SQL is
+required.**
+
+### 2. API — `backend/src`
+
+Set your PostgreSQL credentials in
+[`backend/src/appsettings.json`](backend/src/appsettings.json):
+
+```json
+"ConnectionStrings": {
+  "DefaultConnection": "Host=localhost;Port=5432;Database=AI_CCTV_System;Username=postgres;Password=YOUR_PASSWORD;"
+}
+```
+
+> Don't commit this file with a real password. Use
+> `appsettings.Development.json` / user-secrets for local overrides.
+
+```bash
+cd backend/src
+dotnet restore
+dotnet run --launch-profile http      # → http://localhost:5237
+```
+
+### 3. AI engine — `ai-engine`
+
+```bash
+cd ai-engine
+pip install -r requirements.txt
+python stream_server.py               # Flask on http://localhost:5000
+```
+
+Useful environment variables (all optional):
+
+| Var | Default | Purpose |
 |---|---|---|
-| Python | **3.11 exactly** | https://www.python.org/downloads/release/python-3119/ |
-| .NET SDK | **8 exactly** | https://dotnet.microsoft.com/en-us/download/dotnet/8 |
-| Node.js + npm | Any LTS | https://nodejs.org/ |
-| PostgreSQL + pgAdmin | Any recent | https://www.postgresql.org/download/ |
-| Git | Any | https://git-scm.com/downloads |
+| `CAMERA_SOURCE` | (configured RTSP url) | Set to `0` to use a local webcam, or an `rtsp://…` url. |
+| `YOLO_MODEL` | `yolo11n.pt` | YOLO weights to load (falls back to `yolov8n.pt`). |
 
-> ⚠️ **.NET version matters.** The project targets `net8.0`. If you install version 9 or 10 it will not run.
+Model weights (`yolo11n.pt`, `yolov8n.pt`, `face_landmarker.task`) and the
+`openh264` DLL are committed so the engine runs offline out of the box.
+`rtsp_test.py` / `find_camera_rtsp.py` are standalone helpers for locating an
+RTSP stream.
 
-> ⚠️ **Mac only:** Do NOT install Python via Homebrew — it has a known incompatibility with the current macOS system library. Use the official `.pkg` installer from the python.org link above (download the "macOS 64-bit universal2 installer").
+### 4. Web dashboard — `frontend`
 
----
+The API base URL is read from `NEXT_PUBLIC_API_BASE` (see `.env.local`,
+defaults to `http://localhost:5237`).
 
-## Windows Setup (full walkthrough)
-
-### 1. Install prerequisites
-
-Download and install each item from the table above. For PostgreSQL, the Windows installer from postgresql.org includes pgAdmin — tick that box during installation. When it asks you to set a password for the `postgres` user, **write it down** — you'll need it later.
-
-After installing Python 3.11, open Command Prompt and verify:
-```
-python --version
-pip --version
-```
-Both should show. If `python` isn't found, re-run the Python installer and tick **"Add Python to PATH"**.
-
-After installing .NET 8, verify:
-```
-dotnet --version
-```
-Should show `8.x.x`.
-
-### 2. Clone the repo
-
-```
-git clone https://github.com/Tanmay1123/CctvSystem.git
-cd CctvSystem
-```
-
-### 3. PostgreSQL database setup
-
-Open **pgAdmin 4** (installed with PostgreSQL). In the left sidebar, expand `Servers → PostgreSQL` and connect using your postgres password.
-
-**Create the database:**
-Right-click `Databases → Create → Database`, name it exactly: `AI_CCTV_System`, then click Save.
-
-**Create the Alerts table:**
-Click on `AI_CCTV_System`, then open the Query Tool (Tools menu → Query Tool) and paste and run:
-
-```sql
-CREATE TABLE "Alerts" (
-    "AlertId"        SERIAL PRIMARY KEY,
-    "AlertType"      VARCHAR(100),
-    "CameraName"     VARCHAR(100),
-    "AlertTime"      TIMESTAMP,
-    "ScreenshotPath" VARCHAR(500),
-    "Status"         VARCHAR(50),
-    "CreatedDate"    TIMESTAMP
-);
-```
-
-Click the play button (▶) to run it. You should see "Query returned successfully".
-
-### 4. Set your connection string
-
-Open `AI_CCTV_API\AI_CCTV_API\appsettings.json` in any text editor and replace `YOUR_PASSWORD` with the postgres password you set during installation:
-
-```json
-"ConnectionStrings": {
-  "DefaultConnection": "Host=localhost;Port=5432;Database=AI_CCTV_System;Username=postgres;Password=YOUR_PASSWORD;"
-}
-```
-
-> Do not commit this file to git with your real password in it.
-
-### 5. Fix the alerts folder path
-
-Open `AI_CCTV_PY\stream_server.py` and find the `API_ALERTS_FOLDER` line. Replace it with the actual path to where you cloned the repo:
-
-```python
-API_ALERTS_FOLDER = r"C:\Users\YOUR_USERNAME\Desktop\CctvSystem\AI_CCTV_API\AI_CCTV_API\wwwroot\alerts"
-```
-
-Use your actual Windows username and the actual path — right-click the `wwwroot\alerts` folder in Explorer and choose "Copy as path" to get the exact string.
-
-### 6. Install Python packages
-
-Open Command Prompt, navigate to the project and install:
-
-```
-cd AI_CCTV_PY
-pip install ultralytics opencv-python flask flask-cors mediapipe requests psycopg2-binary urllib3
-```
-
-This will take a few minutes — ultralytics and torch are large downloads.
-
-### 7. Install .NET packages
-
-```
-cd AI_CCTV_API\AI_CCTV_API
-dotnet restore
-```
-
-Trust the HTTPS dev certificate (first time only):
-```
-dotnet dev-certs https --trust
-```
-A popup will appear asking you to confirm — click Yes.
-
-### 8. Install frontend packages
-
-```
-cd AI_CCTV_UI
+```bash
+cd frontend
 npm install
+npm run dev                            # → http://localhost:3001
 ```
 
-If Angular CLI is not installed:
-```
-npm install -g @angular/cli
-```
+## Running everything
 
-### 9. Run the project
-
-Open **three separate Command Prompt windows** and run one command in each:
-
-**Window 1 — .NET API:**
-```
-cd AI_CCTV_API\AI_CCTV_API
-dotnet run
-```
-Wait until you see: `Now listening on: http://localhost:5237`
-
-**Window 2 — Python AI engine:**
-```
-cd AI_CCTV_PY
-python main.py
-```
-
-**Window 3 — Frontend:**
-```
-cd AI_CCTV_UI
-ng serve
-```
-Wait until you see: `Application bundle generation complete`
-
-Then open your browser at **http://localhost:4200**
-
----
-
-## Mac Setup (full walkthrough)
-
-### 1. Install prerequisites
-
-Download and install each item from the prerequisites table. For Python, use the `macOS 64-bit universal2 installer` `.pkg` file from python.org — not Homebrew.
-
-For .NET 8, you can use either the official Microsoft installer or Homebrew:
-```bash
-brew install dotnet@8
-```
-
-If you used Homebrew, add these lines to your `~/.zshrc` so the terminal finds .NET 8:
-```bash
-export DOTNET_ROOT="/opt/homebrew/opt/dotnet@8/libexec"
-export PATH="/opt/homebrew/opt/dotnet@8/bin:$PATH"
-export PATH="$PATH:/Users/YOUR_USERNAME/.dotnet/tools"
-```
-Then run `source ~/.zshrc`. Verify with `dotnet --version` — should show `8.x.x`.
-
-### 2. Clone the repo
+Start the three services in separate terminals — **API first**, then the AI
+engine, then the web app:
 
 ```bash
-git clone https://github.com/Tanmay1123/CctvSystem.git
-cd CctvSystem
+# terminal 1
+cd backend/src && dotnet run --launch-profile http
+
+# terminal 2
+cd ai-engine && python stream_server.py
+
+# terminal 3
+cd frontend && npm run dev
 ```
 
-### 3. PostgreSQL database setup
+Then open <http://localhost:3001>.
 
-Open **pgAdmin 4**. Connect to your local server (password is whatever you set during PostgreSQL installation).
+## Notes
 
-**Create the database:**
-Right-click `Databases → Create → Database`, name it exactly: `AI_CCTV_System`, click Save.
+- Detection screenshots are written to `backend/src/wwwroot/alerts/` and
+  `ai-engine/alerts/`. These are runtime output and are git-ignored.
+- CORS: make sure the API is running before the web app so requests aren't
+  blocked.
+- **Adding cameras:** add any camera from **Camera Management → Add Camera** by
+  pasting its `rtsp://` URL — no code changes needed. Browsers can't play RTSP,
+  so the engine relays it to MJPEG at `/stream?src=…`; it then appears under
+  **Live Cameras**. An `http(s)` MJPEG URL (like the AI feed
+  `http://localhost:5000/video`) is shown directly. The full AI pipeline runs on
+  the primary `/video` camera; added cameras are live-view only.
+</content>
 
-**Create the Alerts table:**
-Click on `AI_CCTV_System`, open Query Tool (Tools → Query Tool), paste and run:
 
-```sql
-CREATE TABLE "Alerts" (
-    "AlertId"        SERIAL PRIMARY KEY,
-    "AlertType"      VARCHAR(100),
-    "CameraName"     VARCHAR(100),
-    "AlertTime"      TIMESTAMP,
-    "ScreenshotPath" VARCHAR(500),
-    "Status"         VARCHAR(50),
-    "CreatedDate"    TIMESTAMP
-);
-```
-
-### 4. Set your connection string
-
-Open `AI_CCTV_API/AI_CCTV_API/appsettings.json` and replace `YOUR_PASSWORD`:
-
-```json
-"ConnectionStrings": {
-  "DefaultConnection": "Host=localhost;Port=5432;Database=AI_CCTV_System;Username=postgres;Password=YOUR_PASSWORD;"
-}
-```
-
-### 5. Fix the alerts folder path
-
-Open `AI_CCTV_PY/stream_server.py` and update `API_ALERTS_FOLDER`:
-
-```python
-API_ALERTS_FOLDER = "/Users/YOUR_USERNAME/path/to/CctvSystem/AI_CCTV_API/AI_CCTV_API/wwwroot/alerts"
-```
-
-### 6. Install Python packages
-
-```bash
-/usr/local/bin/python3.11 -m pip install ultralytics opencv-python flask flask-cors mediapipe requests psycopg2-binary urllib3
-```
-
-### 7. Install .NET packages
-
-```bash
-cd AI_CCTV_API/AI_CCTV_API
-dotnet restore
-dotnet dev-certs https --trust
-```
-
-### 8. Install frontend packages
-
-```bash
-cd AI_CCTV_UI
-npm install
-```
-
-### 9. Run the project
-
-Open **three separate terminal tabs/windows**:
-
-**Tab 1 — .NET API:**
-```bash
-cd AI_CCTV_API/AI_CCTV_API
-dotnet run
-```
-
-**Tab 2 — Python AI engine:**
-```bash
-cd AI_CCTV_PY
-python3.11 main.py
-```
-
-**Tab 3 — Frontend:**
-```bash
-cd AI_CCTV_UI
-ng serve
-```
-
-Then open **http://localhost:4200**
-
----
-
-## Troubleshooting
-
-**Windows: `pip` not found**
-Re-run the Python 3.11 installer, click "Modify", and make sure "Add Python to environment variables" is ticked. Then restart Command Prompt.
-
-**Windows: `dotnet` not found**
-Re-run the .NET 8 installer. Restart Command Prompt after installing.
-
-**Windows: `ng` not found**
-Run `npm install -g @angular/cli`, then restart Command Prompt.
-
-**Windows: PostgreSQL connection refused**
-Make sure the PostgreSQL service is running. Open Task Manager → Services tab → find `postgresql-x64-XX` → right-click → Start.
-
-**Mac: Python `libexpat` / `pyexpat` error**
-You are using Homebrew Python. Uninstall it and use the official python.org installer instead (see prerequisites).
-
-**Mac: `dotnet run` says framework not found**
-Your terminal doesn't have the dotnet@8 exports active. Run:
-```bash
-export DOTNET_ROOT=/opt/homebrew/opt/dotnet@8/libexec
-export PATH="$DOTNET_ROOT:$PATH"
-```
-Or add them permanently to `~/.zshrc`.
-
-**Mac: `dotnet ef` not found**
-```bash
-export PATH="$PATH:/Users/YOUR_USERNAME/.dotnet/tools"
-dotnet tool install --global dotnet-ef --version 8.0.8
-```
-
-**Both: `relation "Alerts" already exists`**
-This is fine — it means the table was already created in pgAdmin. No action needed, the API will work correctly.
-
-**Both: `CORS error` in browser**
-Make sure the .NET API is running before starting the frontend.
-
-**Both: Port already in use**
-Another process is using port 5237 or 4200. Restart your computer, or find and kill the process using that port.
+Now suppose i am handing this project to fellow office dev and exiting myself from it i want you to create a SETUP.md files in great depth with every technical detail you could give him (what is ths project how do you do this and that how to gte steup)

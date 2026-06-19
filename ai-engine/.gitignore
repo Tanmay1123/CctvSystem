@@ -1,0 +1,10 @@
+venv311/
+venv/
+__pycache__/
+*.pyc
+*.pth
+.env
+
+# Runtime-generated detection output (keep the folder, ignore the media)
+alerts/*
+!alerts/.gitkeep
